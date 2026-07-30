@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_NAME="${FLUXTHEMIS_CONDA_ENV:-fluxthemis}"
+ENV_NAME_EXPLICIT=0
+[[ -z "${FLUXTHEMIS_CONDA_ENV:-}" ]] || ENV_NAME_EXPLICIT=1
 ROS2_ENV_NAME="${FLUXTHEMIS_ROS2_CONDA_ENV:-fluxthemis-ros2}"
 FLUXVLA_ENV_NAME="${FLUXVLA_CONDA_ENV:-fluxvla}"
 FLUXVLA_ROOT="${FLUXVLA_ROOT:-/root/projects/FluxVLA}"
@@ -13,7 +15,10 @@ ROS_MODE="auto"
 ROS1_WORKSPACE="${FLUXTHEMIS_ROS1_WORKSPACE:-/root/fluxthemis_ros1_ws}"
 ROS2_WORKSPACE="${FLUXTHEMIS_ROS2_WORKSPACE:-/root/fluxthemis_ros2_ws}"
 SMOKE_LEVEL="libero"
-INSTALL_LIBERO=1
+SMOKE_LEVEL_EXPLICIT=0
+SIMULATOR="libero"
+ROBOCASA_ASSET_MODE="auto"
+ROBOCASA_ASSET_ROOT=""
 INSTALL_FLUXVLA_HOOK=1
 FLUXVLA_HOOK_STATUS='not-applicable'
 WITH_DEV=0
@@ -23,25 +28,30 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/install.sh [options]
 
-Installs FluxThemis/LIBERO into an existing Conda environment and selects a
-ROS runtime from the interpreter ABI. Python 3.10 selects source-built ROS 1
-Noetic; Python 3.12 selects system ROS 2 Jazzy. The default `auto` mode only
-installs the profile matching `--env-name`. `both` is an optional host-level
-convenience and still keeps the two ABIs in separate environments.
+Installs FluxThemis plus one simulator into an existing Conda environment and
+selects a ROS runtime from the interpreter ABI. Python 3.10 selects source-
+built ROS 1 Noetic; Python 3.12 selects system ROS 2 Jazzy. Keep LIBERO and
+RoboCasa in separate Conda environments.
 
 Options:
-  --env-name NAME          Primary environment (default: fluxthemis).
+  --env-name NAME          Primary environment (default: fluxthemis, or
+                           fluxthemis-robocasa for the RoboCasa profile).
   --ros auto|1|2|both|none ROS installation mode (default: auto).
   --ros2-env-name NAME     Python 3.12 environment used by `--ros both`
                            (default: fluxthemis-ros2).
   --fluxvla-env-name NAME  Python 3.10 FluxVLA environment that receives the
                            ROS 1 activation hook (default: fluxvla).
   --fluxvla-root PATH      FluxVLA checkout (default: /root/projects/FluxVLA).
+  --simulator NAME         Simulator profile: libero, robocasa, or none
+                           (default: libero).
+  --robocasa-asset-mode MODE
+                           RoboCasa assets: auto, link, download, or none.
+  --robocasa-asset-root PATH
+                           Existing complete RoboCasa models/assets directory.
   --ros1-workspace PATH    ROS 1 source workspace.
   --ros2-workspace PATH    ROS 2 interface workspace.
-  --smoke-level LEVEL      LIBERO smoke: libero, imports, or none
-                           (default: libero).
-  --skip-libero            Install/verify only ROS.
+  --smoke-level LEVEL      Simulator smoke: libero, robocasa, imports, or none.
+  --skip-libero            Compatibility alias for --simulator none.
   --skip-fluxvla-hook      Do not configure ROS 1 activation for FluxVLA.
   --with-dev               Install FluxThemis development dependencies.
   --dry-run                Print mutating installer commands.
@@ -53,6 +63,9 @@ Examples:
 
   # Optional profile: an existing Python 3.12 env -> ROS 2.
   bash scripts/install.sh --env-name fluxthemis-ros2 --ros auto
+
+  # Dedicated RoboCasa profile: Python 3.10 -> ROS 1.
+  bash scripts/install.sh --simulator robocasa --ros auto
 
   # Optional convenience when both environments already exist.
   bash scripts/install.sh --ros both --ros2-env-name fluxthemis-ros2
@@ -76,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --env-name)
       [[ $# -ge 2 ]] || die '--env-name requires a value'
       ENV_NAME="$2"
+      ENV_NAME_EXPLICIT=1
       shift 2
       ;;
     --ros)
@@ -98,6 +112,21 @@ while [[ $# -gt 0 ]]; do
       FLUXVLA_ROOT="$2"
       shift 2
       ;;
+    --simulator)
+      [[ $# -ge 2 ]] || die '--simulator requires a value'
+      SIMULATOR="$2"
+      shift 2
+      ;;
+    --robocasa-asset-mode)
+      [[ $# -ge 2 ]] || die '--robocasa-asset-mode requires a value'
+      ROBOCASA_ASSET_MODE="$2"
+      shift 2
+      ;;
+    --robocasa-asset-root)
+      [[ $# -ge 2 ]] || die '--robocasa-asset-root requires a value'
+      ROBOCASA_ASSET_ROOT="$2"
+      shift 2
+      ;;
     --ros1-workspace)
       [[ $# -ge 2 ]] || die '--ros1-workspace requires a value'
       ROS1_WORKSPACE="$2"
@@ -111,10 +140,11 @@ while [[ $# -gt 0 ]]; do
     --smoke-level)
       [[ $# -ge 2 ]] || die '--smoke-level requires a value'
       SMOKE_LEVEL="$2"
+      SMOKE_LEVEL_EXPLICIT=1
       shift 2
       ;;
     --skip-libero)
-      INSTALL_LIBERO=0
+      SIMULATOR=none
       shift
       ;;
     --skip-fluxvla-hook)
@@ -141,9 +171,28 @@ case "${ROS_MODE}" in
   auto|1|2|both|none) ;;
   *) die '--ros must be auto, 1, 2, both, or none' ;;
 esac
-case "${SMOKE_LEVEL}" in
-  libero|imports|none) ;;
-  *) die '--smoke-level must be libero, imports, or none' ;;
+case "${SIMULATOR}" in
+  libero|robocasa|none) ;;
+  *) die '--simulator must be libero, robocasa, or none' ;;
+esac
+case "${ROBOCASA_ASSET_MODE}" in
+  auto|link|download|none) ;;
+  *) die '--robocasa-asset-mode must be auto, link, download, or none' ;;
+esac
+if [[ "${SIMULATOR}" == "robocasa" && \
+      "${ENV_NAME_EXPLICIT}" == "0" ]]; then
+  ENV_NAME="fluxthemis-robocasa"
+fi
+if [[ "${SIMULATOR}" == "robocasa" && \
+      "${SMOKE_LEVEL_EXPLICIT}" == "0" ]]; then
+  SMOKE_LEVEL="robocasa"
+fi
+case "${SIMULATOR}:${SMOKE_LEVEL}" in
+  libero:libero|libero:imports|libero:none) ;;
+  robocasa:robocasa|robocasa:imports|robocasa:none) ;;
+  none:none) ;;
+  none:*) SMOKE_LEVEL=none ;;
+  *) die "--smoke-level ${SMOKE_LEVEL@Q} is invalid for ${SIMULATOR}" ;;
 esac
 
 CONDA_BIN="$(command -v conda || true)"
@@ -196,7 +245,7 @@ case "${ROS_MODE}" in
     ;;
 esac
 
-if [[ "${INSTALL_LIBERO}" == "1" ]]; then
+if [[ "${SIMULATOR}" == "libero" ]]; then
   libero_args=(
     --env-name "${ENV_NAME}"
     --fluxvla-root "${FLUXVLA_ROOT}"
@@ -205,6 +254,19 @@ if [[ "${INSTALL_LIBERO}" == "1" ]]; then
   [[ "${WITH_DEV}" == "0" ]] || libero_args+=(--with-dev)
   [[ "${DRY_RUN}" == "0" ]] || libero_args+=(--dry-run)
   bash "${SCRIPT_DIR}/install_libero.sh" "${libero_args[@]}"
+elif [[ "${SIMULATOR}" == "robocasa" ]]; then
+  robocasa_args=(
+    --env-name "${ENV_NAME}"
+    --fluxvla-root "${FLUXVLA_ROOT}"
+    --smoke-level "${SMOKE_LEVEL}"
+    --asset-mode "${ROBOCASA_ASSET_MODE}"
+  )
+  if [[ -n "${ROBOCASA_ASSET_ROOT}" ]]; then
+    robocasa_args+=(--asset-root "${ROBOCASA_ASSET_ROOT}")
+  fi
+  [[ "${WITH_DEV}" == "0" ]] || robocasa_args+=(--with-dev)
+  [[ "${DRY_RUN}" == "0" ]] || robocasa_args+=(--dry-run)
+  bash "${SCRIPT_DIR}/install_robocasa.sh" "${robocasa_args[@]}"
 fi
 
 if [[ "${ROS_MODE}" == "1" || "${ROS_MODE}" == "both" ]]; then
@@ -284,11 +346,15 @@ VERIFY_COMMAND="bash ${SCRIPT_DIR}/check_env.sh --env-name ${ENV_NAME} --ros ${R
 if [[ "${ROS_MODE}" == "both" ]]; then
   VERIFY_COMMAND+=" --ros2-env-name ${ROS2_ENV_NAME}"
 fi
+if [[ "${SIMULATOR}" == "robocasa" ]]; then
+  VERIFY_COMMAND+=" --smoke-level none"
+fi
 
 cat <<EOF
 
 FluxThemis installation complete.
   primary env: ${ENV_NAME} (Python ${PRIMARY_PYTHON})
+  simulator:   ${SIMULATOR}
   ROS mode:    ${ROS_MODE}
   FluxVLA env: ${FLUXVLA_ENV_NAME} (ROS 1 hook: ${FLUXVLA_HOOK_STATUS})
 

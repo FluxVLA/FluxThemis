@@ -1,7 +1,7 @@
 from .base import BaseEnvironment
 from .mock import MockEnvironment
 from .real import BaseRealRobotEnvironment
-from .sim import GymnasiumEnvironment, LiberoEnvironment
+from .sim import GymnasiumEnvironment, LiberoEnvironment, RoboCasaEnvironment
 
 __all__ = [
     'BaseEnvironment',
@@ -9,4 +9,5 @@ __all__ = [
     'GymnasiumEnvironment',
     'LiberoEnvironment',
     'MockEnvironment',
+    'RoboCasaEnvironment',
 ]

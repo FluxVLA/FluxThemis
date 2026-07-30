@@ -24,14 +24,16 @@ beside the target model. The FluxThemis repository neither contains nor owns a
 `work_dirs` directory.
 
 This repository currently provides a generic evaluation lifecycle, ROS client, Mock
-environment, generic Gymnasium adapter, LIBERO simulation adapter, and real-robot
-safety base class. RoboCasa, RoboTwin, and specific real-robot platforms should still
-use their own environments and adapters; do not force mutually conflicting simulator
-dependencies into one Conda environment.
+environment, generic Gymnasium adapter, dedicated LIBERO and RoboCasa simulation
+adapters, and a real-robot safety base class. Each simulator keeps its conflicting
+dependencies in a separate Conda environment; RoboTwin and specific real-robot
+platforms should follow the same adapter boundary.
 
 For a copy-paste installation and the exact single-GPU and multi-GPU commands for
 both repositories, start with the
 [FluxVLA + FluxThemis LIBERO quickstart](docs/quickstart.md).
+For the dedicated RoboCasa environment and its single-GPU and multi-GPU launch
+commands, see the [RoboCasa integration guide](docs/robocasa.md).
 
 ## Install FluxThemis
 
@@ -143,6 +145,26 @@ installation or ABI compatibility requirements. See the
 [ROS 2 deployment guide](docs/ros2.md) for detailed deployment choices. See the
 [ROS 1 deployment guide](docs/ros1.md) for the
 ROS 1/Python 3.10 source overlay, activation method, and limitations.
+
+### One-command RoboCasa environment installation
+
+RoboCasa uses its own simulator environment while reusing the same FluxVLA model
+server:
+
+```bash
+conda create -n fluxthemis-robocasa python=3.10 -y
+cd /root/projects/FluxThemis
+bash scripts/install.sh \
+  --simulator robocasa \
+  --env-name fluxthemis-robocasa \
+  --ros auto \
+  --fluxvla-root /root/projects/FluxVLA
+```
+
+The installer pins the FluxVLA RoboCasa and patched robosuite commits, performs a
+real EGL reset/step smoke test, and links the validated FluxVLA assets by default
+instead of copying approximately 9.3 GB. Full installation and launch commands are
+documented in [docs/robocasa.md](docs/robocasa.md).
 
 ## Add `themis` to the target FluxVLA configuration
 

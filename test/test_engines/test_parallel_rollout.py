@@ -7,8 +7,8 @@ import pytest
 
 from fluxthemis.engines import build_runner_from_cfg
 from fluxthemis.engines.runners.parallel_rollout import (
-    build_episode_jobs, episode_worker_index, make_inference_only_model_config,
-    rollout_worker_main)
+    build_context, build_episode_jobs, episode_worker_index,
+    make_inference_only_model_config, rollout_worker_main)
 from fluxthemis.evaluators.base import BaseEvaluator
 from fluxthemis.model_clients.mock import MockModelClient
 from fluxthemis.structures import EpisodeResult, TaskSpec
@@ -95,6 +95,20 @@ def test_inference_worker_config_drops_reporting_without_mutating_source():
 
     assert worker['transport'] == {'service_name': '/predict'}
     assert source['transport']['report_service_name'] == '/report'
+
+
+def test_context_prefers_dynamic_environment_task_description():
+    task = TaskSpec('0', description='stable environment id')
+
+    context = build_context(
+        task,
+        episode_index=2,
+        seed=9,
+        info={'task_description': 'unlocked_waist: move the bottle'},
+    )
+
+    assert context['task_description'] == \
+        'unlocked_waist: move the bottle'
 
 
 def test_spawned_worker_waits_for_parent_lifecycle_acknowledgements():

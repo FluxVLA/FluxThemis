@@ -232,9 +232,12 @@ def build_context(task: TaskSpec,
                   seed: int,
                   info: Mapping[str, Any],
                   episode_id: str | None = None) -> dict[str, Any]:
+    task_description = info.get('task_description', task.description)
+    if not isinstance(task_description, str):
+        raise TypeError('environment task_description must be a string')
     context = {
         'task_id': task.task_id,
-        'task_description': task.description,
+        'task_description': task_description,
         'task_metadata': dict(task.metadata),
         'episode_index': episode_index,
         'seed': seed,
