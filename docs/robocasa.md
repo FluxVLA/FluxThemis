@@ -92,7 +92,7 @@ export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_MODE=disabled
 
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_robocasa_30_eps_full_finetune.py \
   --ckpt-path /absolute/path/to/robocasa-checkpoint.safetensors \
   --ros-version 1 \
@@ -131,7 +131,7 @@ cd /root/projects/FluxVLA
 export CUDA_VISIBLE_DEVICES=0,1
 export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_MODE=disabled
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_robocasa_30_eps_full_finetune.py \
   --ckpt-path /absolute/path/to/robocasa-checkpoint.safetensors \
   --ros-version 1 \

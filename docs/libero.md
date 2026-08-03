@@ -96,7 +96,7 @@ cd /root/projects/FluxVLA
 export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_MODE=disabled
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --ckpt-path /abs/path/to/checkpoint \
   --ros-version 1
@@ -164,7 +164,7 @@ cd /root/projects/FluxVLA
 export CUDA_VISIBLE_DEVICES=0,1
 export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_MODE=disabled
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --ckpt-path checkpoints/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.safetensors \
   --ros-version 1 \

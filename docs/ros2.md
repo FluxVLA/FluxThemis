@@ -134,7 +134,7 @@ Set the same domain on both sides, then start them separately:
 export ROS_DOMAIN_ID=42
 
 # FluxVLA environment
-python /root/projects/FluxVLA/scripts/ros_inference_server.py \
+bash /root/projects/FluxVLA/scripts/ros_inference_server.sh \
   --config /root/projects/FluxVLA/configs/<family>/<config>.py \
   --ckpt-path /abs/path/to/checkpoint \
   --ros-version 2
@@ -149,7 +149,7 @@ The same episode-affine multi-GPU topology is available with ROS 2:
 ```bash
 # FluxVLA / inference environment
 export CUDA_VISIBLE_DEVICES=0,1
-python /root/projects/FluxVLA/scripts/ros_inference_server.py \
+bash /root/projects/FluxVLA/scripts/ros_inference_server.sh \
   --config /root/projects/FluxVLA/configs/<family>/<config>.py \
   --ckpt-path /abs/path/to/checkpoint \
   --ros-version 2 \

@@ -192,7 +192,9 @@ the FluxVLA terminal.
 
 ### FluxVLA Server Loading Rules
 
-`FluxVLA/scripts/ros_inference_server.py` is responsible for:
+`FluxVLA/scripts/ros_inference_server.sh` is the public launcher. It resolves
+the FluxVLA repository root and forwards all arguments to
+`scripts/ros_inference_server.py`, which is responsible for:
 
 1. Constructing the model from `inference_model`, when present, or otherwise
    from `model`;

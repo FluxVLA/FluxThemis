@@ -88,7 +88,7 @@ to source the overlay manually afterward:
 ```bash
 conda activate fluxvla
 cd /root/projects/FluxVLA
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config /root/projects/FluxVLA/configs/<family>/<config>.py \
   --ckpt-path /abs/path/to/checkpoint \
   --ros-version 1
@@ -100,7 +100,7 @@ them:
 ```bash
 # FluxVLA terminal: two complete model replicas.
 export CUDA_VISIBLE_DEVICES=0,1
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config /root/projects/FluxVLA/configs/<family>/<config>.py \
   --ckpt-path /abs/path/to/checkpoint \
   --ros-version 1 \

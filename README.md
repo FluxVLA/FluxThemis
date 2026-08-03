@@ -367,7 +367,7 @@ In the other terminal, start the FluxVLA ROS inference server on the GPU side:
 ```bash
 cd /abs/path/to/FluxVLA
 conda activate fluxvla
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config /abs/path/to/FluxVLA/configs/<family>/<target_config>.py \
   --ckpt-path /abs/path/to/fluxvla_checkpoint.pt \
   --ros-version 1
@@ -410,7 +410,7 @@ For a two-GPU inference pool and two LIBERO render workers on separate GPUs, use
 ```bash
 # FluxVLA terminal: CUDA devices are logical after CUDA_VISIBLE_DEVICES.
 export CUDA_VISIBLE_DEVICES=0,1
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --ckpt-path /abs/path/to/checkpoint \
   --ros-version 1 \

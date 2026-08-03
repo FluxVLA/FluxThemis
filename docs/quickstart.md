@@ -123,7 +123,7 @@ export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_MODE=disabled
 
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --ckpt-path \
   checkpoints/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.safetensors \
@@ -183,7 +183,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_MODE=disabled
 
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --ckpt-path \
   checkpoints/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.safetensors \
@@ -213,7 +213,7 @@ bash scripts/run_ros1_eval.sh --workers 2 --sim-gpus 0,1 \
 
 # FluxVLA
 export CUDA_VISIBLE_DEVICES=0,1
-python scripts/ros_inference_server.py \
+bash scripts/ros_inference_server.sh \
   --config configs/pi05/pi05_paligemma_libero_10_full_finetune.py \
   --ckpt-path checkpoints/pi05_paligemma_libero_10_full_finetune_bs64/checkpoints/step-028548-epoch-18-loss=0.0111.safetensors \
   --ros-version 1 \
