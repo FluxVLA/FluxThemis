@@ -37,116 +37,49 @@ commands, see the [RoboCasa integration guide](docs/robocasa.md).
 
 ## Install FluxThemis
 
-FluxThemis supports the following two independent installation profiles. Only the
-first one is currently required; the second is retained as a future migration option.
-The environment names are conventions and may be changed to suit the deployment:
+Choose the simulator profile first. LIBERO and RoboCasa have conflicting dependency
+stacks and must be installed into separate Conda environments. Install either profile
+or both, but never install both simulators into the same environment. The installer
+uses an existing environment and never deletes or recreates it.
 
-| Profile | Example Conda environment | Python | ROS | Status |
-| --- | --- | ---: | --- | --- |
-| Current | `fluxthemis` | 3.10 | Source-built Noetic overlay | Installed and used by default |
-| Optional | `fluxthemis-ros2` | 3.12 | Jazzy apt + rosidl overlay | Installation and runtime support retained |
+| Simulator | Recommended environment | Python | Default ROS profile |
+| --- | --- | ---: | --- |
+| LIBERO | `fluxthemis` | 3.10 | ROS 1 Noetic |
+| RoboCasa | `fluxthemis-robocasa` | 3.10 | ROS 1 Noetic |
 
-Ubuntu 24.04 does not provide official Noetic/Python 3.10 binary packages. ROS 1 is
-therefore built from a pinned Noetic release and serializes `sensor_msgs/Image`
-directly without loading the ABI-incompatible `cv_bridge`. If both profiles are kept
-on the same host, they must use separate Conda environments and processes; they do
-not bridge to one another automatically.
+### Install LIBERO
 
-```bash
-# Current installation: the existing fluxthemis environment must use Python 3.10.
-bash scripts/install.sh --env-name fluxthemis --ros auto
-
-# Future optional installation: first prepare a Python 3.12 environment, then run the same entry point independently.
-conda create -n fluxthemis-ros2 python=3.12 -y
-bash scripts/install.sh --env-name fluxthemis-ros2 --ros auto
-```
-
-### One-command LIBERO environment installation
-
-The full installation entry point selects ROS automatically from the target
-environment's Python minor version. The current command installs Python 3.10 + ROS 1
-into `fluxthemis` and writes only the matching ROS1 activation hook into the existing
-`fluxvla` environment. It does not change the FluxVLA Python package or read, create,
-or modify any ROS 2 environment:
+Create the environment if it does not already exist, then run the unified installer
+with the simulator selected explicitly:
 
 ```bash
+conda create -n fluxthemis python=3.10 -y
 cd /root/projects/FluxThemis
-
-bash scripts/install.sh --env-name fluxthemis --ros auto
-```
-
-If Python 3.12 + ROS 2 is selected later, run the installer independently for that
-environment:
-
-```bash
 bash scripts/install.sh \
-  --env-name fluxthemis-ros2 \
-  --ros auto
-```
-
-Add `--skip-libero` when the environment and LIBERO are ready and only ROS needs to
-be rebuilt. The script does not delete or rebuild an existing Conda environment. In
-ROS 1 mode, it also installs only the activation/deactivation hooks into the
-environment named by `--fluxvla-env-name`; disable this with
-`--skip-fluxvla-hook`. `--ros both` remains
-available as an optional convenience for hosts that already have both environments,
-but it is not a requirement for the current installation.
-
-After installing the current environment, run a read-only validation with `auto`.
-The `libero` level also performs an actual MuJoCo reset and step. Validate the
-optional ROS 2 environment independently with the same command:
-
-```bash
-bash scripts/check_env.sh --env-name fluxthemis --ros auto \
-  --smoke-level libero
-bash scripts/check_env.sh --env-name fluxthemis-ros2 --ros auto \
-  --smoke-level none
-```
-
-The installation script accepts an existing Python 3.10 or 3.12 Conda environment.
-The primary path for a FluxVLA installation that has not been upgraded should
-continue using `fluxthemis` / Python 3.10; only the ROS 2 Jazzy migration environment
-uses Python 3.12:
-
-```bash
-cd /root/projects/FluxThemis
-bash scripts/install_libero.sh \
+  --simulator libero \
   --env-name fluxthemis \
+  --ros auto \
+  --fluxvla-env-name fluxvla \
   --fluxvla-root /root/projects/FluxVLA
 ```
 
-The script does not delete or rebuild the Conda environment. It installs CPU Torch
-and the minimum environment-side dependencies, pins LIBERO and robosuite to the
-commits used by FluxVLA, and installs them in editable mode under
-`$CONDA_PREFIX/src/fluxthemis` to retain BDDL files, assets, and pinned initial-state
-files. If `/root/projects/FluxVLA/src` already contains the corresponding commit, the
-script clones from that local checkout first; otherwise, it accesses GitHub.
-
-The script also configures an environment-specific `LIBERO_CONFIG_PATH` and MuJoCo
-EGL activation hook. By default, it creates an actual 64x64 LIBERO-10 environment and
-performs a reset, 10 stabilization actions, and one simulation action. Use
-`--smoke-level imports` to check imports only, or `--smoke-level none` to skip the
-smoke test entirely. The manual post-installation check is:
+This installs the minimum environment-side dependencies, pins LIBERO and robosuite
+to the revisions used by FluxVLA, configures `LIBERO_CONFIG_PATH` and headless MuJoCo
+EGL, builds the selected ROS runtime, and performs a real reset/step smoke test. It
+does not install FluxVLA model or training dependencies. Validate the installed
+profile again with:
 
 ```bash
-conda activate fluxthemis
-python scripts/libero_smoke.py --suite libero_10 --task-id 0
+bash scripts/check_env.sh \
+  --env-name fluxthemis \
+  --ros auto \
+  --smoke-level libero
 ```
 
-TensorFlow and robomimic are deliberately not installed: they belong to FluxVLA's
-training/data pipeline and are not used for environment rollouts in FluxThemis.
+See the [LIBERO quickstart](docs/quickstart.md) for the matching FluxVLA setup and
+single-GPU or multi-GPU evaluation commands.
 
-`rclpy`, `cv_bridge`, and ROS 2 itself are provided by the ROS installation, not by
-pip extras. When migrating to Jazzy, both the FluxVLA server and the FluxThemis
-environment side must use Python 3.12, and each environment must verify that
-`rclpy`, `cv_bridge`, and the generated service type can be imported. Matching Python
-minor versions is required; do not use `pip install rclpy` to bypass the ROS
-installation or ABI compatibility requirements. See the
-[ROS 2 deployment guide](docs/ros2.md) for detailed deployment choices. See the
-[ROS 1 deployment guide](docs/ros1.md) for the
-ROS 1/Python 3.10 source overlay, activation method, and limitations.
-
-### One-command RoboCasa environment installation
+### Install RoboCasa
 
 RoboCasa uses its own simulator environment while reusing the same FluxVLA model
 server:
@@ -158,6 +91,7 @@ bash scripts/install.sh \
   --simulator robocasa \
   --env-name fluxthemis-robocasa \
   --ros auto \
+  --fluxvla-env-name fluxvla \
   --fluxvla-root /root/projects/FluxVLA
 ```
 
@@ -165,6 +99,36 @@ The installer pins the FluxVLA RoboCasa and patched robosuite commits, performs 
 real EGL reset/step smoke test, and links the validated FluxVLA assets by default
 instead of copying approximately 9.3 GB. Full installation and launch commands are
 documented in [docs/robocasa.md](docs/robocasa.md).
+
+### ROS selection and advanced installation
+
+`--ros auto` selects the ROS runtime from the target environment's Python minor
+version:
+
+| Python | ROS runtime | Support |
+| ---: | --- | --- |
+| 3.10 | Source-built ROS 1 Noetic | Current default |
+| 3.12 | ROS 2 Jazzy + rosidl workspace | Optional migration profile |
+
+Ubuntu 24.04 does not provide Noetic binaries, so the ROS 1 installer builds a pinned
+minimal stack against Python 3.10. Jazzy uses the system Python 3.12 ABI. Both the
+FluxVLA server and FluxThemis evaluator must use the same ROS version; ROS 1 and ROS 2
+profiles cannot share one Conda environment or communicate directly.
+
+To use ROS 2, create a separate Python 3.12 environment for the selected simulator
+and run the same command with that environment name. The FluxVLA server must also be
+migrated to Python 3.12 and ROS 2. `rclpy`, `cv_bridge`, and ROS 2 are supplied by the
+Jazzy installation and must not be installed from pip.
+
+Use `--simulator none` when only the ROS runtime needs to be installed or rebuilt.
+`--skip-libero` remains as a compatibility alias for `--simulator none`, and
+`--skip-fluxvla-hook` disables installation of the ROS 1 activation hook into the
+FluxVLA environment. `--ros both` is an advanced convenience for hosts that already
+have separate Python 3.10 and Python 3.12 environments; it does not combine both ROS
+versions in one environment.
+
+See the [ROS 1 deployment guide](docs/ros1.md) and
+[ROS 2 deployment guide](docs/ros2.md) for build details and limitations.
 
 ## Add `themis` to the target FluxVLA configuration
 
