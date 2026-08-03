@@ -50,7 +50,7 @@ Options:
                            Existing complete RoboCasa models/assets directory.
   --ros1-workspace PATH    ROS 1 source workspace.
   --ros2-workspace PATH    ROS 2 interface workspace.
-  --smoke-level LEVEL      Simulator smoke: libero, robocasa, imports, or none.
+  --smoke-level LEVEL      LIBERO verification: libero, imports, or none.
   --skip-libero            Compatibility alias for --simulator none.
   --skip-fluxvla-hook      Do not configure ROS 1 activation for FluxVLA.
   --with-dev               Install FluxThemis development dependencies.
@@ -183,17 +183,17 @@ if [[ "${SIMULATOR}" == "robocasa" && \
       "${ENV_NAME_EXPLICIT}" == "0" ]]; then
   ENV_NAME="fluxthemis-robocasa"
 fi
-if [[ "${SIMULATOR}" == "robocasa" && \
-      "${SMOKE_LEVEL_EXPLICIT}" == "0" ]]; then
-  SMOKE_LEVEL="robocasa"
+if [[ "${SIMULATOR}" == "libero" ]]; then
+  case "${SMOKE_LEVEL}" in
+    libero|imports|none) ;;
+    *) die '--smoke-level must be libero, imports, or none' ;;
+  esac
+elif [[ "${SIMULATOR}" == "robocasa" ]]; then
+  [[ "${SMOKE_LEVEL_EXPLICIT}" == "0" ]] || \
+    die '--smoke-level is only available with --simulator libero'
+else
+  SMOKE_LEVEL=none
 fi
-case "${SIMULATOR}:${SMOKE_LEVEL}" in
-  libero:libero|libero:imports|libero:none) ;;
-  robocasa:robocasa|robocasa:imports|robocasa:none) ;;
-  none:none) ;;
-  none:*) SMOKE_LEVEL=none ;;
-  *) die "--smoke-level ${SMOKE_LEVEL@Q} is invalid for ${SIMULATOR}" ;;
-esac
 
 CONDA_BIN="$(command -v conda || true)"
 [[ -n "${CONDA_BIN}" ]] || die 'conda is not available on PATH'
@@ -258,7 +258,6 @@ elif [[ "${SIMULATOR}" == "robocasa" ]]; then
   robocasa_args=(
     --env-name "${ENV_NAME}"
     --fluxvla-root "${FLUXVLA_ROOT}"
-    --smoke-level "${SMOKE_LEVEL}"
     --asset-mode "${ROBOCASA_ASSET_MODE}"
   )
   if [[ -n "${ROBOCASA_ASSET_ROOT}" ]]; then

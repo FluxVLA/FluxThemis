@@ -65,16 +65,8 @@ bash scripts/install.sh \
 
 This installs the minimum environment-side dependencies, pins LIBERO and robosuite
 to the revisions used by FluxVLA, configures `LIBERO_CONFIG_PATH` and headless MuJoCo
-EGL, builds the selected ROS runtime, and performs a real reset/step smoke test. It
-does not install FluxVLA model or training dependencies. Validate the installed
-profile again with:
-
-```bash
-bash scripts/check_env.sh \
-  --env-name fluxthemis \
-  --ros auto \
-  --smoke-level libero
-```
+EGL, and builds the selected ROS runtime. It does not install FluxVLA model or
+training dependencies.
 
 See the [LIBERO quickstart](docs/quickstart.md) for the matching FluxVLA setup and
 single-GPU or multi-GPU evaluation commands.
@@ -95,10 +87,10 @@ bash scripts/install.sh \
   --fluxvla-root /root/projects/FluxVLA
 ```
 
-The installer pins the FluxVLA RoboCasa and patched robosuite commits, performs a
-real EGL reset/step smoke test, and links the validated FluxVLA assets by default
-instead of copying approximately 9.3 GB. Full installation and launch commands are
-documented in [docs/robocasa.md](docs/robocasa.md).
+The installer pins the FluxVLA RoboCasa and patched robosuite commits and links the
+validated FluxVLA assets by default instead of copying approximately 9.3 GB. Full
+installation and launch commands are documented in
+[docs/robocasa.md](docs/robocasa.md).
 
 ### ROS selection and advanced installation
 

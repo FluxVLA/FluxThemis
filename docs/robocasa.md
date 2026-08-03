@@ -43,23 +43,9 @@ approximately 9.3 GB asset tree. Use `--robocasa-asset-root /absolute/path` to
 select another complete asset tree, or `--robocasa-asset-mode download` when
 no local tree is available.
 
-The installer performs a real EGL reset and one environment step. It also
-installs a headless EGL activation hook in `fluxthemis-robocasa` and the ROS 1
-activation hook into both `fluxthemis-robocasa` and `fluxvla`. Reactivate the
-environments after installation.
-
-The simulator-only smoke test can be repeated without loading a model:
-
-```bash
-conda run -n fluxthemis-robocasa \
-  env MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
-  python /root/projects/FluxThemis/scripts/robocasa_smoke.py --steps 1
-```
-
-Gymnasium may warn that observations are outside the declared observation
-space. The upstream wrapper declares normalized bounds even though it returns
-raw joint values; FluxThemis validates keys, shapes, dtypes, and finite values
-instead.
+The installer adds a headless EGL activation hook to `fluxthemis-robocasa` and
+the ROS 1 activation hook to both `fluxthemis-robocasa` and `fluxvla`.
+Reactivate the environments after installation.
 
 ## Supported FluxVLA configurations
 

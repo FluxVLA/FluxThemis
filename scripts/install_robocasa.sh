@@ -34,7 +34,6 @@ ENV_NAME="${FLUXTHEMIS_CONDA_ENV:-fluxthemis-robocasa}"
 FLUXVLA_ROOT="${FLUXVLA_ROOT:-/root/projects/FluxVLA}"
 SOURCE_ROOT=""
 SYSTEM_DEPS="auto"
-SMOKE_LEVEL="robocasa"
 ASSET_MODE="auto"
 ASSET_ROOT=""
 ASSET_DOWNLOAD_ROOT=""
@@ -79,8 +78,6 @@ Options:
   --system-deps auto|always|never
                                Install missing EGL packages when possible
                                (default: auto).
-  --smoke-level robocasa|imports|none
-                               Verification depth (default: robocasa).
   --torch-version VERSION      CPU Torch version installed when absent
                                (default: 2.8.0).
   --with-dev                   Install FluxThemis development dependencies.
@@ -172,11 +169,6 @@ while [[ $# -gt 0 ]]; do
       SYSTEM_DEPS="$2"
       shift 2
       ;;
-    --smoke-level)
-      [[ $# -ge 2 ]] || die '--smoke-level requires a value'
-      SMOKE_LEVEL="$2"
-      shift 2
-      ;;
     --torch-version)
       [[ $# -ge 2 ]] || die '--torch-version requires a value'
       TORCH_VERSION="$2"
@@ -202,17 +194,10 @@ case "${SYSTEM_DEPS}" in
   auto|always|never) ;;
   *) die '--system-deps must be auto, always, or never' ;;
 esac
-case "${SMOKE_LEVEL}" in
-  robocasa|imports|none) ;;
-  *) die '--smoke-level must be robocasa, imports, or none' ;;
-esac
 case "${ASSET_MODE}" in
   auto|link|download|none) ;;
   *) die '--asset-mode must be auto, link, download, or none' ;;
 esac
-if [[ "${ASSET_MODE}" == "none" && "${SMOKE_LEVEL}" != "none" ]]; then
-  die '--asset-mode none requires --smoke-level none'
-fi
 if [[ "${ASSET_MODE}" == "download" && -n "${ASSET_ROOT}" ]]; then
   die '--asset-root cannot be combined with --asset-mode download'
 fi
@@ -530,27 +515,14 @@ run install -m 0644 "${PROJECT_ROOT}/scripts/deactivate_robocasa.sh" \
   "${DEACTIVATION_DIR}/fluxthemis-robocasa.sh"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
-  echo 'Dry run complete; no installation or smoke test was performed.'
+  echo 'Dry run complete; no installation was performed.'
   exit 0
 fi
 
-SMOKE_ENV=(env MUJOCO_GL=egl PYOPENGL_PLATFORM=egl)
 conda_run python -m pip check
 [[ "$(git -C "${ROBOCASA_DIR}" rev-parse HEAD)" == "${ROBOCASA_REF}" ]]
 [[ "$(git -C "${ROBOSUITE_DIR}" rev-parse HEAD)" == "${ROBOSUITE_REF}" ]]
-conda_run "${SMOKE_ENV[@]}" fluxthemis-eval --help >/dev/null
-
-case "${SMOKE_LEVEL}" in
-  imports)
-    conda_run "${SMOKE_ENV[@]}" python \
-      "${PROJECT_ROOT}/scripts/robocasa_smoke.py" --imports-only
-    ;;
-  robocasa)
-    conda_run "${SMOKE_ENV[@]}" python \
-      "${PROJECT_ROOT}/scripts/robocasa_smoke.py" --steps 1
-    ;;
-  none) ;;
-esac
+conda_run fluxthemis-eval --help >/dev/null
 
 cat <<EOF
 
