@@ -112,7 +112,7 @@ class LiberoEnvironment(BaseEnvironment):
     def setup(self) -> None:
         if self._suite is not None:
             return
-        runtime = _load_libero_runtime()
+        runtime = self._load_runtime()
         benchmark_dict = runtime.benchmark.get_benchmark_dict()
         if self.task_suite_name not in benchmark_dict:
             raise KeyError(
@@ -127,18 +127,7 @@ class LiberoEnvironment(BaseEnvironment):
                 TaskSpec(
                     task_id=str(task_index),
                     description=str(task.language),
-                    metadata={
-                        'benchmark':
-                        'libero',
-                        'task_suite_name':
-                        self.task_suite_name,
-                        'task_index':
-                        task_index,
-                        'task_name':
-                        str(task.name),
-                        'recommended_max_episode_steps':
-                        self.recommended_max_episode_steps,
-                    },
+                    metadata=self._task_metadata(task, task_index, runtime),
                 ))
         if not tasks:
             raise ValueError(
@@ -297,7 +286,7 @@ class LiberoEnvironment(BaseEnvironment):
             'controller': self.controller,
         }
         kwargs.update(self.env_kwargs)
-        env = self._runtime.envs.OffScreenRenderEnv(**kwargs)
+        env = self._create_environment(kwargs)
         try:
             env.seed(self.simulator_seed)
         except Exception:
@@ -310,6 +299,24 @@ class LiberoEnvironment(BaseEnvironment):
         self._last_observation = None
         self._episode_done = False
         self._warmup_success = False
+
+    def _load_runtime(self) -> _LiberoRuntime:
+        return _load_libero_runtime()
+
+    def _task_metadata(self, task: Any, task_index: int,
+                       runtime: _LiberoRuntime) -> dict[str, Any]:
+        del runtime
+        return {
+            'benchmark': 'libero',
+            'task_suite_name': self.task_suite_name,
+            'task_index': task_index,
+            'task_name': str(task.name),
+            'recommended_max_episode_steps':
+            self.recommended_max_episode_steps,
+        }
+
+    def _create_environment(self, kwargs: Mapping[str, Any]) -> Any:
+        return self._runtime.envs.OffScreenRenderEnv(**kwargs)
 
     def _close_active_env(self) -> None:
         env = self._env

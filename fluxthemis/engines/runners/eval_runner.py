@@ -44,6 +44,7 @@ class EvalRunner:
                  max_episode_steps: int = 1000,
                  execute_horizon: int | None = None,
                  task_ids: Sequence[str] | str | None = None,
+                 task_metadata_filters: Mapping[str, Any] | None = None,
                  stop_on_success: bool = True,
                  work_dir: str | os.PathLike | None = None,
                  run_name: str | None = None,
@@ -135,6 +136,8 @@ class EvalRunner:
         self.max_episode_steps = int(max_episode_steps)
         self.execute_horizon = execute_horizon
         self.task_ids = self._normalize_task_ids(task_ids)
+        self.task_metadata_filters = self._normalize_task_metadata_filters(
+            task_metadata_filters)
         self.stop_on_success = bool(stop_on_success)
         self.work_dir = resolved_work_dir
         self.run_name = run_name or self._default_run_name()
@@ -989,16 +992,38 @@ class EvalRunner:
         if len(task_ids) != len(set(task_ids)):
             raise ValueError(
                 f'Environment returned duplicate task ids: {task_ids}')
-        if self.task_ids is None:
-            return tasks
-        task_map = {task.task_id: task for task in tasks}
-        missing = [
-            task_id for task_id in self.task_ids if task_id not in task_map
-        ]
-        if missing:
+        selected = tasks
+        if self.task_ids is not None:
+            task_map = {task.task_id: task for task in tasks}
+            missing = [
+                task_id for task_id in self.task_ids if task_id not in task_map
+            ]
+            if missing:
+                raise ValueError(
+                    f'Unknown task ids {missing}; available tasks: '
+                    f'{task_ids}')
+            selected = [task_map[task_id] for task_id in self.task_ids]
+
+        if self.task_metadata_filters is None:
+            return selected
+        known_fields = {str(key) for task in tasks for key in task.metadata}
+        unknown_fields = sorted(set(self.task_metadata_filters) - known_fields)
+        if unknown_fields:
             raise ValueError(
-                f'Unknown task ids {missing}; available tasks: {task_ids}')
-        return [task_map[task_id] for task_id in self.task_ids]
+                f'Unknown task metadata filter fields {unknown_fields}; '
+                f'available fields: {sorted(known_fields)}')
+        missing_value = object()
+        selected = [
+            task for task in selected if all(
+                (value := task.metadata.get(field, missing_value))
+                is not missing_value and any(value == expected
+                                             for expected in expected_values)
+                for field, expected_values in
+                self.task_metadata_filters.items())
+        ]
+        if not selected:
+            raise ValueError('Task metadata filters selected no tasks')
+        return selected
 
     def _build_summary(self,
                        results: list[EpisodeResult],
@@ -1068,7 +1093,7 @@ class EvalRunner:
             'total_episodes':
             total_episodes,
             'full_suite':
-            self.task_ids is None,
+            self._is_full_suite,
             'tasks': [
                 self._task_report(task, task_index)
                 for task_index, task in enumerate(self.tasks_to_run)
@@ -1078,6 +1103,9 @@ class EvalRunner:
             payload['resolved_config'] = {
                 'source': self._resolved_config_source,
             }
+        if self.task_metadata_filters is not None:
+            payload['task_metadata_filters'] = to_jsonable(
+                self.task_metadata_filters)
         return payload
 
     def _build_episode_start_report(self, task: TaskSpec,
@@ -1148,7 +1176,7 @@ class EvalRunner:
             'total_episodes':
             total_episodes,
             'full_suite':
-            self.task_ids is None,
+            self._is_full_suite,
             'current_episode': (to_jsonable(dict(current_episode))
                                 if current_episode is not None else None),
             'last_result':
@@ -1423,6 +1451,36 @@ class EvalRunner:
         if len(normalized) != len(set(normalized)):
             raise ValueError(f'task_ids contains duplicates: {normalized}')
         return normalized
+
+    @staticmethod
+    def _normalize_task_metadata_filters(
+        filters: Mapping[str, Any] | None
+    ) -> dict[str, tuple[Any, ...]] | None:
+        if filters is None:
+            return None
+        if not isinstance(filters, Mapping):
+            raise TypeError('task_metadata_filters must be a mapping')
+        if not filters:
+            raise ValueError('task_metadata_filters cannot be empty')
+        normalized = {}
+        for field, expected in filters.items():
+            if not isinstance(field, str) or not field:
+                raise ValueError(
+                    'task_metadata_filters fields must be non-empty strings')
+            if isinstance(expected,
+                          Sequence) and not isinstance(expected, (str, bytes)):
+                values = tuple(expected)
+            else:
+                values = (expected, )
+            if not values:
+                raise ValueError(
+                    f'task_metadata_filters[{field!r}] cannot be empty')
+            normalized[field] = values
+        return normalized
+
+    @property
+    def _is_full_suite(self) -> bool:
+        return (self.task_ids is None and self.task_metadata_filters is None)
 
     @staticmethod
     def _default_run_name() -> str:

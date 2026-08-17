@@ -1,0 +1,8 @@
+# Environment-side LIBERO-Plus runtime only. The upstream requirements file
+# pins an obsolete training stack and must not be installed. FluxVLA remains
+# responsible for model preprocessing, inference, and action denormalization.
+-r requirements-libero.txt
+huggingface-hub>=0.27,<2
+PyYAML>=6,<7
+scikit-image==0.25.2
+Wand==0.7.2

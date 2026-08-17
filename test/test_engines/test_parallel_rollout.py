@@ -260,6 +260,62 @@ def test_eval_runner_coordinates_spawned_workers_and_parent_reporting(
     assert events[0][1]['simulator_gpu_ids'] == ['2', '3']
 
 
+@pytest.mark.parametrize('parallel_workers', [1, 2])
+def test_metadata_filter_and_grouped_metrics_match_rollout_modes(
+        tmp_path, parallel_workers):
+    runner = build_runner_from_cfg(
+        dict(
+            type='EvalRunner',
+            environment=dict(
+                type='MockEnvironment',
+                tasks=[
+                    dict(
+                        task_id='camera',
+                        metadata={
+                            'category': 'Camera Viewpoints',
+                            'difficulty_level': 3,
+                        }),
+                    dict(
+                        task_id='light',
+                        metadata={
+                            'category': 'Light Conditions',
+                            'difficulty_level': 3,
+                        }),
+                ],
+                success_after=1,
+            ),
+            model_client=dict(
+                type=_ParallelReportingMockModelClient,
+                transport={'report_service_name': '/report'},
+            ),
+            evaluator=dict(
+                type='SuccessRateEvaluator',
+                group_by_metadata=['category', 'difficulty_level'],
+            ),
+            task_metadata_filters={'category': ['Camera Viewpoints']},
+            episodes_per_task=1,
+            max_episode_steps=1,
+            work_dir=str(tmp_path),
+            parallel_workers=parallel_workers,
+            parallel_startup_timeout_s=15.0,
+            parallel_event_timeout_s=15.0,
+            parallel_ack_timeout_s=15.0,
+        ))
+    try:
+        runner.run_setup()
+        summary = runner.run()
+    finally:
+        runner.cleanup()
+
+    assert summary['run']['tasks'] == ['camera']
+    assert summary['metrics']['overall']['successes'] == 1
+    assert summary['metrics']['groups']['category']['Camera Viewpoints'][
+        'success_rate'] == 1.0
+    assert summary['metrics']['groups']['difficulty_level']['3'][
+        'episodes'] == 1
+    assert runner.model_client.events[0][1]['full_suite'] is False
+
+
 def test_parallel_runner_rejects_a_client_without_remote_reporting(tmp_path):
     with pytest.raises(ValueError, match='requires FluxVLA evaluation'):
         build_runner_from_cfg(

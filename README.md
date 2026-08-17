@@ -24,27 +24,31 @@ beside the target model. The FluxThemis repository neither contains nor owns a
 `work_dirs` directory.
 
 This repository currently provides a generic evaluation lifecycle, ROS client, Mock
-environment, generic Gymnasium adapter, dedicated LIBERO and RoboCasa simulation
-adapters, and a real-robot safety base class. Each simulator keeps its conflicting
-dependencies in a separate Conda environment; RoboTwin and specific real-robot
-platforms should follow the same adapter boundary.
+environment, generic Gymnasium adapter, dedicated LIBERO, LIBERO-Plus, and
+RoboCasa simulation adapters, and a real-robot safety base class. Each
+simulator keeps its conflicting dependencies in a separate Conda environment;
+RoboTwin and specific real-robot platforms should follow the same adapter
+boundary.
 
 For a copy-paste installation and the exact single-GPU and multi-GPU commands for
 both repositories, start with the
 [FluxVLA + FluxThemis LIBERO quickstart](docs/quickstart.md).
 For the dedicated RoboCasa environment and its single-GPU and multi-GPU launch
 commands, see the [RoboCasa integration guide](docs/robocasa.md).
+For the 10,030-task robustness benchmark, metadata filtering, and grouped
+metrics, see the [LIBERO-Plus integration guide](docs/libero_plus.md).
 
 ## Install FluxThemis
 
-Choose the simulator profile first. LIBERO and RoboCasa have conflicting dependency
-stacks and must be installed into separate Conda environments. Install either profile
-or both, but never install both simulators into the same environment. The installer
-uses an existing environment and never deletes or recreates it.
+Choose the simulator profile first. LIBERO, LIBERO-Plus, and RoboCasa have
+conflicting dependency stacks and must be installed into separate Conda
+environments. The installer uses an existing environment and never deletes or
+recreates it.
 
 | Simulator | Recommended environment | Python | Default ROS profile |
 | --- | --- | ---: | --- |
 | LIBERO | `fluxthemis` | 3.10 | ROS 1 Noetic |
+| LIBERO-Plus | `fluxthemis-libero-plus` | 3.10 | ROS 1 Noetic |
 | RoboCasa | `fluxthemis-robocasa` | 3.10 | ROS 1 Noetic |
 
 ### Install LIBERO
@@ -70,6 +74,27 @@ training dependencies.
 
 See the [LIBERO quickstart](docs/quickstart.md) for the matching FluxVLA setup and
 single-GPU or multi-GPU evaluation commands.
+
+### Install LIBERO-Plus
+
+LIBERO-Plus uses an isolated package namespace, config path, assets, and Conda
+environment:
+
+```bash
+conda create -n fluxthemis-libero-plus python=3.10 -y
+cd /root/projects/FluxThemis
+bash scripts/install.sh \
+  --simulator libero-plus \
+  --env-name fluxthemis-libero-plus \
+  --ros auto \
+  --fluxvla-env-name fluxvla \
+  --fluxvla-root /root/projects/FluxVLA
+```
+
+The default `auto` asset mode links a valid existing official asset tree when
+available and otherwise downloads, verifies, and safely publishes the pinned
+6.4 GB archive. See [docs/libero_plus.md](docs/libero_plus.md) for link/download
+options, all four suites, filtering, grouped metrics, and final aggregation.
 
 ### Install RoboCasa
 

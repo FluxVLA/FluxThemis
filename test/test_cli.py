@@ -103,6 +103,50 @@ def test_cli_dry_run_only_builds_components(fluxvla_config, capsys):
     assert not (fluxvla_config.parents[2] / 'work_dirs').exists()
 
 
+def test_cli_adapts_standard_libero_config_for_libero_plus_zero_shot(
+        tmp_path, capsys):
+    config_path, _ = _write_fluxvla_config(
+        tmp_path,
+        'fluxvla_libero_10.py',
+        """
+themis = dict(
+    runner=dict(
+        type='EvalRunner',
+        environment=dict(
+            type='LiberoEnvironment',
+            task_suite_name='libero_10',
+            task_order_index=0,
+        ),
+        model_client=dict(type='MockModelClient', action_dim=7),
+        evaluator=dict(type='SuccessRateEvaluator'),
+        episodes_per_task=50,
+        max_episode_steps=520,
+        execute_horizon=10,
+        work_dir='unused',
+    ),
+)
+""",
+    )
+    arguments = [
+        '--config',
+        str(config_path),
+        '--dry-run',
+        '--cfg-options',
+        'themis.runner.environment.type=LiberoPlusEnvironment',
+        'themis.runner.task_ids=["0"]',
+        'themis.runner.episodes_per_task=1',
+    ]
+
+    cfg, runner_cfg = load_config(parse_args(arguments))
+    assert cfg.themis.runner.environment.type == 'LiberoPlusEnvironment'
+    assert runner_cfg.environment.type == 'LiberoPlusEnvironment'
+    assert runner_cfg.task_ids == [0]
+    assert runner_cfg.episodes_per_task == 1
+
+    assert main(arguments) == 0
+    assert 'LiberoPlusEnvironment' in capsys.readouterr().out
+
+
 def test_cli_applies_parallel_worker_and_simulator_gpu_overrides(
         fluxvla_config):
     cfg, runner_cfg = load_config(

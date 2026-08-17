@@ -473,6 +473,126 @@ def test_task_filter_preserves_requested_order(tmp_path):
     assert set(summary['metrics']['tasks']) == {'task_b'}
 
 
+def test_metadata_filters_use_or_within_fields_and_and_across_fields(tmp_path):
+    tasks = [
+        dict(
+            task_id='camera-2',
+            metadata={
+                'category': 'Camera Viewpoints',
+                'difficulty_level': 2,
+            }),
+        dict(
+            task_id='camera-3',
+            metadata={
+                'category': 'Camera Viewpoints',
+                'difficulty_level': 3,
+            }),
+        dict(
+            task_id='light-3',
+            metadata={
+                'category': 'Light Conditions',
+                'difficulty_level': 3,
+            }),
+    ]
+    runner = build_runner_from_cfg(
+        _runner_cfg(
+            tmp_path,
+            environment=dict(
+                type='MockEnvironment', tasks=tasks, success_after=1),
+            task_metadata_filters=dict(
+                category=['Camera Viewpoints', 'Light Conditions'],
+                difficulty_level=[3],
+            ),
+            episodes_per_task=1,
+            run_name='metadata-filtered',
+        ))
+    try:
+        runner.run_setup()
+        summary = runner.run()
+    finally:
+        runner.cleanup()
+
+    assert summary['run']['tasks'] == ['camera-3', 'light-3']
+
+
+def test_task_ids_and_metadata_filters_are_intersected(tmp_path):
+    runner = build_runner_from_cfg(
+        _runner_cfg(
+            tmp_path,
+            environment=dict(
+                type='MockEnvironment',
+                tasks=[
+                    dict(task_id='a', metadata={'difficulty_level': None}),
+                    dict(task_id='b', metadata={'difficulty_level': 3}),
+                    dict(task_id='c', metadata={'difficulty_level': None}),
+                ],
+                success_after=1,
+            ),
+            task_ids=['c', 'b'],
+            task_metadata_filters={'difficulty_level': [None]},
+            episodes_per_task=1,
+            run_name='intersected',
+        ))
+    try:
+        runner.run_setup()
+    finally:
+        runner.cleanup()
+
+    assert [task.task_id for task in runner.tasks_to_run] == ['c']
+
+
+def test_metadata_filter_rejects_unknown_field_and_empty_result(tmp_path):
+    for run_name, filters, message in (
+        ('unknown-field', {
+            'missing': [1]
+        }, 'Unknown task metadata'),
+        ('empty-result', {
+            'difficulty': [9]
+        }, 'selected no tasks'),
+    ):
+        runner = build_runner_from_cfg(
+            _runner_cfg(
+                tmp_path,
+                environment=dict(
+                    type='MockEnvironment',
+                    tasks=[dict(task_id='a', metadata={'difficulty': 1})],
+                ),
+                task_metadata_filters=filters,
+                run_name=run_name,
+            ))
+        with pytest.raises(ValueError, match=message):
+            runner.run_setup()
+        runner.cleanup()
+
+
+def test_metadata_filter_marks_reported_run_as_partial(tmp_path):
+    model_client = _ReportingMockModelClient()
+    runner = build_runner_from_cfg(
+        _runner_cfg(
+            tmp_path,
+            environment=dict(
+                type='MockEnvironment',
+                tasks=[dict(task_id='a', metadata={'category': 'Camera'})],
+                success_after=1,
+            ),
+            model_client=model_client,
+            task_metadata_filters={'category': ['Camera']},
+            episodes_per_task=1,
+            run_name='metadata-report',
+        ))
+    try:
+        runner.run_setup()
+        runner.run()
+    finally:
+        runner.cleanup()
+
+    assert model_client.events[0][1]['full_suite'] is False
+    assert model_client.events[0][1]['task_metadata_filters'] == {
+        'category': ['Camera']
+    }
+    assert model_client.events[-1][1]['full_suite'] is False
+
+
 @pytest.mark.parametrize('run_name', ['.', '..', '../outside', '/tmp/outside'])
 def test_run_name_cannot_escape_work_dir(tmp_path, run_name):
     with pytest.raises(ValueError):

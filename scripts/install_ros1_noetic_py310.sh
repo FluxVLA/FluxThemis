@@ -351,7 +351,8 @@ build_overlay() {
     --install-space "${INSTALL_SPACE}" \
     --force-cmake \
     --only-pkg-with-deps \
-      roslaunch rosmaster rosout rospy rosmsg sensor_msgs fluxthemis_msgs \
+      roslaunch rosmaster rosout rospy rosmsg rosservice sensor_msgs \
+      fluxthemis_msgs \
     -j"${BUILD_JOBS}" -l"${BUILD_JOBS}" \
     --cmake-args \
       -DCMAKE_BUILD_TYPE=Release \
@@ -396,8 +397,10 @@ source "$3"
 "${CONDA_PREFIX}/bin/python" -c '\''import sys, rospy; from Cryptodome.Cipher import AES; from sensor_msgs.msg import Image; from fluxthemis_msgs.srv import PredictAction, ReportEvaluation; assert sys.version_info[:2] == (3, 10); print("ROS 1 Python imports: OK", PredictAction, ReportEvaluation)'\''
 "${CONDA_PREFIX}/bin/python" -m pip check
 rospack find rospy >/dev/null
+rospack find rosservice >/dev/null
 rospack find sensor_msgs >/dev/null
 rospack find fluxthemis_msgs >/dev/null
+command -v rosservice >/dev/null
 rossrv show fluxthemis_msgs/PredictAction | grep -Fq "sensor_msgs/Image[] images"
 rossrv show fluxthemis_msgs/PredictAction | grep -Fq "float32[] actions"
 rossrv show fluxthemis_msgs/ReportEvaluation | grep -Fq "string payload_json"
