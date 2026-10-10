@@ -31,7 +31,6 @@ REQUIRED_ASSET_PATHS=(
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_NAME="${FLUXTHEMIS_CONDA_ENV:-fluxthemis-robocasa}"
-FLUXVLA_ROOT="${FLUXVLA_ROOT:-/root/projects/FluxVLA}"
 SOURCE_ROOT=""
 SYSTEM_DEPS="auto"
 ASSET_MODE="auto"
@@ -53,20 +52,16 @@ Usage: bash scripts/install_robocasa.sh [options]
 
 Installs RoboCasa into an existing Python 3.10 or 3.12 conda environment.
 The default environment is `fluxthemis-robocasa`; it is never deleted or
-recreated. Python 3.10 can be paired with ROS 1 and Python 3.12 with ROS 2.
+recreated.
 
 Options:
   --env-name NAME              Target environment (default:
                                fluxthemis-robocasa).
-  --fluxvla-root PATH          FluxVLA checkout used as the preferred source
-                               and asset seed (default: /root/projects/FluxVLA).
   --source-root PATH           Managed RoboCasa/robosuite checkout directory
                                (default: <conda-prefix>/src/fluxthemis).
   --asset-mode auto|link|download|none
-                               Asset strategy (default: auto). Auto first
-                               links a valid explicit asset root, then the
-                               exact FluxVLA checkout, and downloads only when
-                               neither is usable.
+                               Asset strategy (default: auto). Auto links an
+                               explicit asset root or downloads a managed copy.
   --asset-root PATH            Existing complete RoboCasa models/assets
                                directory to link into the managed checkout.
   --asset-download-root PATH   Shared download destination (default:
@@ -127,11 +122,6 @@ while [[ $# -gt 0 ]]; do
     --env-name)
       [[ $# -ge 2 ]] || die '--env-name requires a value'
       ENV_NAME="$2"
-      shift 2
-      ;;
-    --fluxvla-root)
-      [[ $# -ge 2 ]] || die '--fluxvla-root requires a value'
-      FLUXVLA_ROOT="$2"
       shift 2
       ;;
     --source-root)
@@ -220,7 +210,6 @@ ENV_PREFIX="$("${CONDA_BIN}" run -n "${ENV_NAME}" python -c \
   'import sys; print(sys.prefix)')"
 [[ -n "${SOURCE_ROOT}" ]] || SOURCE_ROOT="${ENV_PREFIX}/src/fluxthemis"
 SOURCE_ROOT="$(realpath -m "${SOURCE_ROOT}")"
-FLUXVLA_ROOT="$(realpath -m "${FLUXVLA_ROOT}")"
 [[ -z "${ASSET_ROOT}" ]] || ASSET_ROOT="$(realpath -m "${ASSET_ROOT}")"
 [[ -n "${ASSET_DOWNLOAD_ROOT}" ]] || \
   ASSET_DOWNLOAD_ROOT="${SOURCE_ROOT}/robocasa-assets"
@@ -249,6 +238,13 @@ ensure_system_dependencies() {
     echo "warning: missing system packages: ${missing[*]}" >&2
     return
   fi
+  if [[ "${SYSTEM_DEPS}" == "auto" ]] && command -v git >/dev/null 2>&1 && \
+      "${CONDA_BIN}" run -n "${ENV_NAME}" python -c \
+      'import ctypes; [ctypes.CDLL(name) for name in ("libEGL.so.1", "libGL.so.1", "libGLESv2.so.2")]' \
+      >/dev/null 2>&1; then
+    echo 'EGL/OpenGL runtime is available outside dpkg; skipping optional system packages.'
+    return
+  fi
   if [[ "${EUID}" -eq 0 ]]; then
     run env DEBIAN_FRONTEND=noninteractive apt-get update
     run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -270,18 +266,6 @@ bootstrap_pip() {
   conda_run python -m ensurepip --upgrade
 }
 
-source_seed() {
-  local local_path="$1"
-  local ref="$2"
-  local remote="$3"
-  if [[ -d "${local_path}/.git" ]] && \
-    git -C "${local_path}" cat-file -e "${ref}^{commit}" 2>/dev/null; then
-    printf '%s\n' "${local_path}"
-  else
-    printf '%s\n' "${remote}"
-  fi
-}
-
 robocasa_managed_status_is_safe() {
   local target="$1"
   local line
@@ -299,8 +283,7 @@ prepare_checkout() {
   local name="$1"
   local ref="$2"
   local remote="$3"
-  local fluxvla_path="$4"
-  local allow_asset_link="${5:-0}"
+  local allow_asset_link="${4:-0}"
   local target="${SOURCE_ROOT}/${name}"
   local head
   if [[ -e "${target}" ]]; then
@@ -320,11 +303,9 @@ prepare_checkout() {
     return
   fi
 
-  local seed
-  seed="$(source_seed "${fluxvla_path}" "${ref}" "${remote}")"
   if [[ "${DRY_RUN}" == "1" ]]; then
     print_command mkdir -p "${SOURCE_ROOT}"
-    print_command git clone --no-hardlinks --no-checkout "${seed}" "${target}"
+    print_command git clone --no-checkout "${remote}" "${target}"
     print_command git -C "${target}" checkout --detach "${ref}"
     CHECKOUT_PATH="${target}"
     return
@@ -332,7 +313,7 @@ prepare_checkout() {
 
   mkdir -p "${SOURCE_ROOT}"
   CLONE_TMP="$(mktemp -d "${SOURCE_ROOT}/.clone-${name}.XXXXXX")"
-  run git clone --no-hardlinks --no-checkout "${seed}" "${CLONE_TMP}"
+  run git clone --no-checkout "${remote}" "${CLONE_TMP}"
   run git -C "${CLONE_TMP}" checkout --detach "${ref}"
   [[ "$(git -C "${CLONE_TMP}" rev-parse HEAD)" == "${ref}" ]] || \
     die "failed to resolve ${name} at ${ref}"
@@ -351,20 +332,10 @@ assets_are_valid() {
   return 0
 }
 
-fluxvla_assets_are_reusable() {
-  local checkout="${FLUXVLA_ROOT}/src/robocasa-gr1-tabletop-tasks"
-  [[ -d "${checkout}/.git" ]] || return 1
-  [[ "$(git -C "${checkout}" rev-parse HEAD 2>/dev/null || true)" == \
-    "${ROBOCASA_REF}" ]] || return 1
-  assets_are_valid "${checkout}/robocasa/models/assets"
-}
-
 download_assets() {
   local destination="$1"
   local base_assets="$2"
-  local downloader="${FLUXVLA_ROOT}/scripts/download_robocasa_assets.py"
-  [[ -f "${downloader}" ]] || die \
-    "RoboCasa asset downloader is missing: ${downloader}; use --asset-root"
+  local downloader="${PROJECT_ROOT}/scripts/download_robocasa_assets.py"
   if [[ ! -d "${destination}" ]]; then
     run mkdir -p "${destination}"
     run cp -a "${base_assets}/." "${destination}/"
@@ -452,20 +423,18 @@ else
   echo 'Keeping the compatible Torch already installed in the target env.'
 fi
 
-PROJECT_EXTRAS='sim,real'
+PROJECT_SPEC="${PROJECT_ROOT}"
 if [[ "${WITH_DEV}" == "1" ]]; then
-  PROJECT_EXTRAS='sim,real,dev'
+  PROJECT_SPEC="${PROJECT_ROOT}[dev]"
 fi
 conda_run python -m pip install -r \
   "${PROJECT_ROOT}/requirements-robocasa.txt"
-conda_run python -m pip install -e "${PROJECT_ROOT}[${PROJECT_EXTRAS}]"
+conda_run python -m pip install -e "${PROJECT_SPEC}"
 
 prepare_checkout robocasa-gr1-tabletop-tasks "${ROBOCASA_REF}" \
-  "${ROBOCASA_REPO}" \
-  "${FLUXVLA_ROOT}/src/robocasa-gr1-tabletop-tasks" 1
+  "${ROBOCASA_REPO}" 1
 ROBOCASA_DIR="${CHECKOUT_PATH}"
-prepare_checkout robosuite "${ROBOSUITE_REF}" "${ROBOSUITE_REPO}" \
-  "${FLUXVLA_ROOT}/src/robosuite"
+prepare_checkout robosuite "${ROBOSUITE_REF}" "${ROBOSUITE_REPO}"
 ROBOSUITE_DIR="${CHECKOUT_PATH}"
 
 PACKAGE_ASSETS="${ROBOCASA_DIR}/robocasa/models/assets"
@@ -478,17 +447,8 @@ if [[ "${ASSET_MODE}" != "none" && -n "${ASSET_ROOT}" ]]; then
     die "explicit RoboCasa asset root is incomplete: ${ASSET_ROOT}"
   fi
 fi
-if [[ "${ASSET_MODE}" == "auto" && -z "${SELECTED_ASSETS}" ]] && \
-    fluxvla_assets_are_reusable; then
-  SELECTED_ASSETS="${FLUXVLA_ROOT}/src/robocasa-gr1-tabletop-tasks/robocasa/models/assets"
-  echo "Reusing exact FluxVLA RoboCasa assets from ${SELECTED_ASSETS}."
-fi
 if [[ "${ASSET_MODE}" == "link" && -z "${SELECTED_ASSETS}" ]]; then
-  if fluxvla_assets_are_reusable; then
-    SELECTED_ASSETS="${FLUXVLA_ROOT}/src/robocasa-gr1-tabletop-tasks/robocasa/models/assets"
-  else
-    die '--asset-mode link requires --asset-root or complete assets in the exact FluxVLA checkout'
-  fi
+  die '--asset-mode link requires --asset-root'
 fi
 if [[ "${ASSET_MODE}" == "download" || \
       ( "${ASSET_MODE}" == "auto" && -z "${SELECTED_ASSETS}" ) ]]; then
@@ -506,14 +466,6 @@ fi
 conda_run python -m pip install --no-deps -e "${ROBOSUITE_DIR}"
 conda_run python -m pip install --no-deps -e "${ROBOCASA_DIR}"
 
-ACTIVATION_DIR="${ENV_PREFIX}/etc/conda/activate.d"
-DEACTIVATION_DIR="${ENV_PREFIX}/etc/conda/deactivate.d"
-run mkdir -p "${ACTIVATION_DIR}" "${DEACTIVATION_DIR}"
-run install -m 0644 "${PROJECT_ROOT}/scripts/activate_robocasa.sh" \
-  "${ACTIVATION_DIR}/fluxthemis-robocasa.sh"
-run install -m 0644 "${PROJECT_ROOT}/scripts/deactivate_robocasa.sh" \
-  "${DEACTIVATION_DIR}/fluxthemis-robocasa.sh"
-
 if [[ "${DRY_RUN}" == "1" ]]; then
   echo 'Dry run complete; no installation was performed.'
   exit 0
@@ -522,7 +474,8 @@ fi
 conda_run python -m pip check
 [[ "$(git -C "${ROBOCASA_DIR}" rev-parse HEAD)" == "${ROBOCASA_REF}" ]]
 [[ "$(git -C "${ROBOSUITE_DIR}" rev-parse HEAD)" == "${ROBOSUITE_REF}" ]]
-conda_run fluxthemis-eval --help >/dev/null
+conda_run python "${PROJECT_ROOT}/scripts/distributed_eval.py" --help \
+  >/dev/null
 
 cat <<EOF
 

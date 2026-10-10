@@ -21,8 +21,7 @@ SYSTEM_PACKAGES=(
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_NAME="${FLUXTHEMIS_CONDA_ENV:-fluxthemis}"
-FLUXVLA_ROOT="${FLUXVLA_ROOT:-/root/projects/FluxVLA}"
+ENV_NAME="${FLUXTHEMIS_CONDA_ENV:-fluxthemis-libero}"
 SOURCE_ROOT=""
 SYSTEM_DEPS="auto"
 SMOKE_LEVEL="libero"
@@ -39,12 +38,11 @@ usage() {
 Usage: bash scripts/install_libero.sh [options]
 
 Installs LIBERO into an existing Python 3.10 or 3.12 conda environment. The
-default environment is `fluxthemis`; it is never deleted or recreated.
+default environment is `fluxthemis-libero`; it is never deleted or recreated.
 
 Options:
-  --env-name NAME              Target conda environment (default: fluxthemis).
-  --fluxvla-root PATH          FluxVLA checkout used as the preferred local
-                               source seed (default: /root/projects/FluxVLA).
+  --env-name NAME              Target conda environment (default:
+                               fluxthemis-libero).
   --source-root PATH           Managed LIBERO/robosuite checkout directory
                                (default: <conda-prefix>/src/fluxthemis).
   --system-deps auto|always|never
@@ -59,7 +57,7 @@ Options:
   -h, --help                   Show this help.
 
 Environment variables:
-  FLUXTHEMIS_CONDA_ENV, FLUXVLA_ROOT, FLUXTHEMIS_TORCH_VERSION
+  FLUXTHEMIS_CONDA_ENV, FLUXTHEMIS_TORCH_VERSION
   FLUXTHEMIS_TORCH_WHEEL_URL    Direct CPU wheel URL. Linux x86_64 defaults
                                 to the Aliyun mirror; empty disables it.
   FLUXTHEMIS_TORCH_INDEX_URLS   Fallback CPU wheel indexes. Default: PyTorch
@@ -68,7 +66,7 @@ Environment variables:
 Examples:
   bash scripts/install_libero.sh
   bash scripts/install_libero.sh --smoke-level imports
-  bash scripts/install_libero.sh --env-name fluxthemis --with-dev
+  bash scripts/install_libero.sh --env-name fluxthemis-libero --with-dev
 EOF
 }
 
@@ -108,11 +106,6 @@ while [[ $# -gt 0 ]]; do
     --env-name)
       [[ $# -ge 2 ]] || die '--env-name requires a value'
       ENV_NAME="$2"
-      shift 2
-      ;;
-    --fluxvla-root)
-      [[ $# -ge 2 ]] || die '--fluxvla-root requires a value'
-      FLUXVLA_ROOT="$2"
       shift 2
       ;;
     --source-root)
@@ -177,7 +170,6 @@ ENV_PREFIX="$("${CONDA_BIN}" run -n "${ENV_NAME}" python -c \
   'import sys; print(sys.prefix)')"
 [[ -n "${SOURCE_ROOT}" ]] || SOURCE_ROOT="${ENV_PREFIX}/src/fluxthemis"
 SOURCE_ROOT="$(realpath -m "${SOURCE_ROOT}")"
-FLUXVLA_ROOT="$(realpath -m "${FLUXVLA_ROOT}")"
 
 ensure_system_dependencies() {
   local missing=()
@@ -201,6 +193,13 @@ ensure_system_dependencies() {
     echo "warning: missing system packages: ${missing[*]}" >&2
     return
   fi
+  if [[ "${SYSTEM_DEPS}" == "auto" ]] && command -v git >/dev/null 2>&1 && \
+      "${CONDA_BIN}" run -n "${ENV_NAME}" python -c \
+      'import ctypes; [ctypes.CDLL(name) for name in ("libEGL.so.1", "libGL.so.1", "libGLESv2.so.2")]' \
+      >/dev/null 2>&1; then
+    echo 'EGL/OpenGL runtime is available outside dpkg; skipping optional system packages.'
+    return
+  fi
   if [[ "${EUID}" -eq 0 ]]; then
     run env DEBIAN_FRONTEND=noninteractive apt-get update
     run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -222,23 +221,10 @@ bootstrap_pip() {
   conda_run python -m ensurepip --upgrade
 }
 
-source_seed() {
-  local local_path="$1"
-  local ref="$2"
-  local remote="$3"
-  if [[ -d "${local_path}/.git" ]] && \
-    git -C "${local_path}" cat-file -e "${ref}^{commit}" 2>/dev/null; then
-    printf '%s\n' "${local_path}"
-  else
-    printf '%s\n' "${remote}"
-  fi
-}
-
 prepare_checkout() {
   local name="$1"
   local ref="$2"
   local remote="$3"
-  local fluxvla_path="$4"
   local target="${SOURCE_ROOT}/${name}"
   local head
   if [[ -e "${target}" ]]; then
@@ -253,11 +239,9 @@ prepare_checkout() {
     return
   fi
 
-  local seed
-  seed="$(source_seed "${fluxvla_path}" "${ref}" "${remote}")"
   if [[ "${DRY_RUN}" == "1" ]]; then
     print_command mkdir -p "${SOURCE_ROOT}"
-    print_command git clone --no-hardlinks --no-checkout "${seed}" "${target}"
+    print_command git clone --no-checkout "${remote}" "${target}"
     print_command git -C "${target}" checkout --detach "${ref}"
     CHECKOUT_PATH="${target}"
     return
@@ -265,7 +249,7 @@ prepare_checkout() {
 
   mkdir -p "${SOURCE_ROOT}"
   CLONE_TMP="$(mktemp -d "${SOURCE_ROOT}/.clone-${name}.XXXXXX")"
-  run git clone --no-hardlinks --no-checkout "${seed}" "${CLONE_TMP}"
+  run git clone --no-checkout "${remote}" "${CLONE_TMP}"
   run git -C "${CLONE_TMP}" checkout --detach "${ref}"
   [[ "$(git -C "${CLONE_TMP}" rev-parse HEAD)" == "${ref}" ]] || \
     die "failed to resolve ${name} at ${ref}"
@@ -276,12 +260,7 @@ prepare_checkout() {
 
 ensure_system_dependencies
 bootstrap_pip
-if [[ "${PYTHON_VERSION}" == "3.10" ]]; then
-  # Noetic's catkin setup helpers use APIs removed by newer setuptools.
-  conda_run python -m pip install --upgrade pip 'setuptools==70.3.0' wheel
-else
-  conda_run python -m pip install --upgrade pip setuptools wheel
-fi
+conda_run python -m pip install --upgrade pip setuptools wheel
 
 if ! "${CONDA_BIN}" run -n "${ENV_NAME}" python -c \
   'import torch; version=tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2]); raise SystemExit(version < (2, 0))' \
@@ -316,32 +295,23 @@ else
   echo 'Keeping the compatible Torch already installed in the target env.'
 fi
 
-PROJECT_EXTRAS='sim,real'
+PROJECT_SPEC="${PROJECT_ROOT}"
 if [[ "${WITH_DEV}" == "1" ]]; then
-  PROJECT_EXTRAS='sim,real,dev'
+  PROJECT_SPEC="${PROJECT_ROOT}[dev]"
 fi
 conda_run python -m pip install -r "${PROJECT_ROOT}/requirements-libero.txt"
-conda_run python -m pip install -e "${PROJECT_ROOT}[${PROJECT_EXTRAS}]"
+conda_run python -m pip install -e "${PROJECT_SPEC}"
 
-prepare_checkout LIBERO "${LIBERO_REF}" "${LIBERO_REPO}" \
-  "${FLUXVLA_ROOT}/src/libero"
+prepare_checkout LIBERO "${LIBERO_REF}" "${LIBERO_REPO}"
 LIBERO_DIR="${CHECKOUT_PATH}"
-prepare_checkout robosuite "${ROBOSUITE_REF}" "${ROBOSUITE_REPO}" \
-  "${FLUXVLA_ROOT}/src/robosuite"
+prepare_checkout robosuite "${ROBOSUITE_REF}" "${ROBOSUITE_REPO}"
 ROBOSUITE_DIR="${CHECKOUT_PATH}"
 
 conda_run python -m pip install --no-deps -e "${ROBOSUITE_DIR}"
 conda_run python -m pip install --no-deps -e "${LIBERO_DIR}"
 
 LIBERO_CONFIG_DIR="${ENV_PREFIX}/etc/fluxthemis/libero"
-ACTIVATION_DIR="${ENV_PREFIX}/etc/conda/activate.d"
-DEACTIVATION_DIR="${ENV_PREFIX}/etc/conda/deactivate.d"
-run mkdir -p "${LIBERO_CONFIG_DIR}" "${ACTIVATION_DIR}" \
-  "${DEACTIVATION_DIR}"
-run install -m 0644 "${PROJECT_ROOT}/scripts/activate_libero.sh" \
-  "${ACTIVATION_DIR}/fluxthemis-libero.sh"
-run install -m 0644 "${PROJECT_ROOT}/scripts/deactivate_libero.sh" \
-  "${DEACTIVATION_DIR}/fluxthemis-libero.sh"
+run mkdir -p "${LIBERO_CONFIG_DIR}"
 conda_run env "LIBERO_CONFIG_PATH=${LIBERO_CONFIG_DIR}" python -c \
   'import sys; from libero.libero import set_libero_default_path; set_libero_default_path(sys.argv[1])' \
   "${LIBERO_DIR}/libero/libero" >/dev/null
@@ -351,24 +321,19 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-SMOKE_ENV=(
-  env
-  "LIBERO_CONFIG_PATH=${LIBERO_CONFIG_DIR}"
-  MUJOCO_GL=egl
-  PYOPENGL_PLATFORM=egl
-)
 conda_run python -m pip check
 [[ "$(git -C "${LIBERO_DIR}" rev-parse HEAD)" == "${LIBERO_REF}" ]]
 [[ "$(git -C "${ROBOSUITE_DIR}" rev-parse HEAD)" == "${ROBOSUITE_REF}" ]]
-conda_run "${SMOKE_ENV[@]}" fluxthemis-eval --help >/dev/null
+conda_run python \
+  "${PROJECT_ROOT}/scripts/distributed_eval.py" --help >/dev/null
 
 case "${SMOKE_LEVEL}" in
   imports)
-    conda_run "${SMOKE_ENV[@]}" python "${PROJECT_ROOT}/scripts/libero_smoke.py" \
+    conda_run python "${PROJECT_ROOT}/scripts/libero_smoke.py" \
       --imports-only
     ;;
   libero)
-    conda_run "${SMOKE_ENV[@]}" python "${PROJECT_ROOT}/scripts/libero_smoke.py" \
+    conda_run python "${PROJECT_ROOT}/scripts/libero_smoke.py" \
       --suite libero_10 --task-id 0 --resolution 64 --steps 1
     ;;
   none) ;;

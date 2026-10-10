@@ -121,7 +121,8 @@ def main() -> int:
         observation, reset_info = environment.reset(
             task=task,
             episode_index=args.episode_index,
-            seed=7 + args.episode_index,
+            environment_seed=7 + args.episode_index,
+            environment_case_index=args.episode_index,
         )
         verify_observation(observation, args.resolution)
 

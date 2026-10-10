@@ -1,4 +1,5 @@
-# Environment-side LIBERO runtime only. Model preprocessing, training and
+# Installed by scripts/install_libero.sh for the LIBERO environment.
+# Model preprocessing, training and
 # action denormalization stay in FluxVLA, so TensorFlow and robomimic are not
 # required here.
 bddl==1.0.1
@@ -6,6 +7,7 @@ cloudpickle==2.1.0
 easydict==1.9
 future==1.0.0
 gym==0.25.2
+imageio-ffmpeg>=0.5,<1
 matplotlib
 mink==0.0.13
 mujoco==3.2.6
@@ -15,6 +17,7 @@ numpy==1.26.4
 opencv-python==4.11.0.86
 Pillow==12.2.0
 pynput==1.8.2
+pytest>=8,<9
 scipy==1.15.3
 termcolor==3.3.0
 tqdm==4.68.3

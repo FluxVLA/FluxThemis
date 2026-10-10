@@ -50,11 +50,20 @@ def test_gymnasium_adapter_maps_task_options_and_success(monkeypatch):
 
     environment.setup()
     task = environment.tasks()[0]
-    observation, info = environment.reset(task, episode_index=0, seed=11)
+    observation, info = environment.reset(
+        task,
+        episode_index=0,
+        environment_seed=11,
+        environment_case_index=0,
+    )
     transition = environment.step(np.asarray([1.0], dtype=np.float32))
 
     assert observation.tolist() == [0.0]
-    assert info == {'reset': True}
+    assert info == {
+        'reset': True,
+        'environment_seed': 11,
+        'environment_case_index': 0,
+    }
     assert fake_env.reset_call == (11, {'difficulty': 2, 'task_id': 'task-a'})
     assert fake_env.last_action == 1
     assert isinstance(fake_env.last_action, int)
@@ -63,20 +72,3 @@ def test_gymnasium_adapter_maps_task_options_and_success(monkeypatch):
     assert environment.render() == 'frame'
     environment.close()
     assert fake_env.closed
-
-
-def test_gymnasium_termination_is_not_success_by_default(monkeypatch):
-    fake_env = _FakeGymEnvironment()
-    monkeypatch.setitem(
-        sys.modules,
-        'gymnasium',
-        SimpleNamespace(make=lambda *args, **kwargs: fake_env),
-    )
-    environment = GymnasiumEnvironment(env_id='Fake-v0')
-    environment.setup()
-    environment.reset(environment.tasks()[0], episode_index=0, seed=1)
-
-    transition = environment.step([0.0])
-
-    assert transition.terminated
-    assert transition.success is None

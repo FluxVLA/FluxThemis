@@ -25,8 +25,12 @@ class BaseRealRobotEnvironment(BaseEnvironment):
                  action_low: Sequence[float] | None = None,
                  action_high: Sequence[float] | None = None,
                  require_action_bounds: bool = True) -> None:
-        self.allow_actuation = bool(allow_actuation)
-        self.require_action_bounds = bool(require_action_bounds)
+        if not isinstance(allow_actuation, bool):
+            raise TypeError('allow_actuation must be a boolean')
+        if not isinstance(require_action_bounds, bool):
+            raise TypeError('require_action_bounds must be a boolean')
+        self.allow_actuation = allow_actuation
+        self.require_action_bounds = require_action_bounds
         self.action_low = (None if action_low is None else np.asarray(
             action_low, dtype=np.float32))
         self.action_high = (None if action_high is None else np.asarray(

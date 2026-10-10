@@ -4,14 +4,14 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from fluxthemis.engines.utils import MODEL_CLIENTS
+from fluxthemis.engines.utils import POLICY_CLIENTS
 from fluxthemis.structures import ActionChunk
 
-from .base import BaseModelClient
+from .base import BasePolicyClient
 
 
-@MODEL_CLIENTS.register_module()
-class MockModelClient(BaseModelClient):
+@POLICY_CLIENTS.register_module()
+class MockPolicyClient(BasePolicyClient):
     """Deterministic action source used by the smoke configuration."""
 
     def __init__(self,
@@ -26,13 +26,9 @@ class MockModelClient(BaseModelClient):
         self.call_count = 0
         self.episode_id = None
 
-    def reset(self, task, episode_index: int, seed: int) -> None:
+    def reset(self, task, episode_index: int, policy_seed: int) -> None:
         self.call_count = 0
         self.episode_id = None
-
-    @property
-    def supports_explicit_episode_id(self) -> bool:
-        return True
 
     def set_episode_id(self, episode_id: str) -> None:
         if not isinstance(episode_id, str) or not episode_id:

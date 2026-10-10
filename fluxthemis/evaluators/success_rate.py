@@ -13,8 +13,6 @@ from .base import BaseEvaluator
 class SuccessRateEvaluator(BaseEvaluator):
     """Aggregate overall and per-task success, return and episode length."""
 
-    supports_parallel_rollouts = True
-
     def __init__(self) -> None:
         self.results: list[EpisodeResult] = []
 
@@ -49,7 +47,7 @@ class SuccessRateEvaluator(BaseEvaluator):
                 'mean_steps': 0.0,
                 'mean_duration_s': 0.0,
             }
-        return {
+        metrics = {
             'episodes': count,
             'successes': successes,
             'success_rate': successes / count,
@@ -57,3 +55,10 @@ class SuccessRateEvaluator(BaseEvaluator):
             'mean_steps': fmean(result.steps for result in results),
             'mean_duration_s': fmean(result.duration_s for result in results),
         }
+        scores = [
+            result.score for result in results if result.score is not None
+        ]
+        if scores:
+            metrics['scored_episodes'] = len(scores)
+            metrics['mean_score'] = fmean(scores)
+        return metrics

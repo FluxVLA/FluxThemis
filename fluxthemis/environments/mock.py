@@ -37,8 +37,9 @@ class MockEnvironment(BaseEnvironment):
     def tasks(self) -> Sequence[TaskSpec]:
         return tuple(self._tasks)
 
-    def reset(self, task: TaskSpec, episode_index: int,
-              seed: int) -> tuple[dict, dict]:
+    def reset(self, task: TaskSpec, episode_index: int, *,
+              environment_seed: int | None,
+              environment_case_index: int | None) -> tuple[dict, dict]:
         if not self.is_setup:
             raise RuntimeError('MockEnvironment.setup() must be called first')
         self.current_task = task
@@ -47,7 +48,8 @@ class MockEnvironment(BaseEnvironment):
         info = {
             'task_id': task.task_id,
             'episode_index': episode_index,
-            'seed': seed,
+            'environment_seed': environment_seed,
+            'environment_case_index': environment_case_index,
         }
         return observation, info
 

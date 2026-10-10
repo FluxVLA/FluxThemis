@@ -1,2 +1,0 @@
-catkin_pkg>=0.5,<2
-rospkg>=1.5,<2

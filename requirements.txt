@@ -1,4 +1,6 @@
-# Full FluxThemis dependency set.
--r requirements-base.txt
--r requirements-sim.txt
--r requirements-real.txt
+# Read by setup.py; shared by every FluxThemis environment.
+gymnasium>=0.29,<2
+msgpack>=1.0
+mmengine==0.10.7
+numpy>=1.26.0,<2
+pyzmq>=25,<27

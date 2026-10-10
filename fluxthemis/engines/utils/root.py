@@ -2,5 +2,5 @@ from mmengine.registry import Registry
 
 ENVIRONMENTS = Registry('environments', scope='fluxthemis')
 EVALUATORS = Registry('evaluators', scope='fluxthemis')
-MODEL_CLIENTS = Registry('model_clients', scope='fluxthemis')
-RUNNERS = Registry('runners', scope='fluxthemis')
+POLICY_CLIENTS = Registry('policy_clients', scope='fluxthemis')
+EVALUATION_REPORTERS = Registry('evaluation_reporters', scope='fluxthemis')

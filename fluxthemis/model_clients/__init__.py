@@ -1,11 +1,9 @@
-from .base import BaseModelClient
-from .fluxvla_ros import FluxVLAROSModelClient
-from .fluxvla_ros2 import FluxVLAROS2ModelClient
-from .mock import MockModelClient
+from .base import BasePolicyClient
+from .fluxvla_policy import FluxVLAPolicyClient
+from .mock import MockPolicyClient
 
 __all__ = [
-    'BaseModelClient',
-    'FluxVLAROSModelClient',
-    'FluxVLAROS2ModelClient',
-    'MockModelClient',
+    'BasePolicyClient',
+    'FluxVLAPolicyClient',
+    'MockPolicyClient',
 ]

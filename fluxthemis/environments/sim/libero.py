@@ -156,15 +156,17 @@ class LiberoEnvironment(BaseEnvironment):
         self._require_setup()
         return self._tasks
 
-    def reset(self, task: TaskSpec, episode_index: int,
-              seed: int) -> tuple[dict[str, Any], dict]:
+    def reset(
+            self, task: TaskSpec, episode_index: int, *,
+            environment_seed: int | None,
+            environment_case_index: int | None) -> tuple[dict[str, Any], dict]:
         self._require_setup()
         if not isinstance(task, TaskSpec):
             raise TypeError('task must be a TaskSpec')
         episode_index = self._nonnegative_integer(episode_index,
                                                   'episode_index')
-        if isinstance(seed, bool) or not isinstance(seed, Integral):
-            raise TypeError('seed must be an integer')
+        environment_case_index = self._nonnegative_integer(
+            environment_case_index, 'environment_case_index')
         if task.task_id not in self._task_indices:
             raise KeyError(
                 f'Unknown LIBERO task id {task.task_id!r}; available ids: '
@@ -175,7 +177,7 @@ class LiberoEnvironment(BaseEnvironment):
             self._activate_task(task_index)
 
         self._env.reset()
-        init_state_index = episode_index % len(self._initial_states)
+        init_state_index = environment_case_index % len(self._initial_states)
         observation = self._env.set_init_state(
             self._initial_states[init_state_index])
 
@@ -202,7 +204,8 @@ class LiberoEnvironment(BaseEnvironment):
             'task_suite_name': self.task_suite_name,
             'task_index': task_index,
             'task_name': task.metadata.get('task_name'),
-            'episode_seed': int(seed),
+            'environment_seed': environment_seed,
+            'environment_case_index': environment_case_index,
             'simulator_seed': self.simulator_seed,
             'init_state_index': init_state_index,
             'warmup_steps': warmup_steps,
@@ -373,6 +376,10 @@ def configure_mujoco_egl_defaults() -> None:
 
 
 def _load_libero_runtime() -> _LiberoRuntime:
+    os.environ.setdefault(
+        'LIBERO_CONFIG_PATH',
+        str(Path(sys.prefix) / 'etc' / 'fluxthemis' / 'libero'),
+    )
     configure_mujoco_egl_defaults()
     try:
         robosuite = importlib.import_module('robosuite')

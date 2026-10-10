@@ -1,7 +1,0 @@
-include README.md
-include requirements*.txt
-recursive-include docs *.md
-recursive-include ros/fluxthemis_msgs CMakeLists.txt package.xml *.srv
-include ros/noetic_py310.rosinstall
-recursive-include ros2/fluxthemis_msgs CMakeLists.txt package.xml *.srv
-recursive-include scripts *.py *.sh

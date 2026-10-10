@@ -1,3 +1,0 @@
-# FluxThemis intentionally does not install FluxVLA, PyTorch, or CUDA.
-mmengine==0.10.7
-numpy==1.26.4

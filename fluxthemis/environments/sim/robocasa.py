@@ -130,15 +130,19 @@ class RoboCasaEnvironment(BaseEnvironment):
         self._require_setup()
         return self._tasks
 
-    def reset(self, task: TaskSpec, episode_index: int,
-              seed: int) -> tuple[dict[str, Any], dict]:
+    def reset(
+            self, task: TaskSpec, episode_index: int, *,
+            environment_seed: int | None,
+            environment_case_index: int | None) -> tuple[dict[str, Any], dict]:
         self._require_setup()
         if not isinstance(task, TaskSpec):
             raise TypeError('task must be a TaskSpec')
         episode_index = self._nonnegative_integer(episode_index,
                                                   'episode_index')
-        if isinstance(seed, bool) or not isinstance(seed, Integral):
-            raise TypeError('seed must be an integer')
+        if (environment_seed is not None
+                and (isinstance(environment_seed, bool)
+                     or not isinstance(environment_seed, Integral))):
+            raise TypeError('environment_seed must be an integer or None')
         if task.task_id not in self._task_indices:
             raise KeyError(
                 f'Unknown RoboCasa task id {task.task_id!r}; available ids: '
@@ -146,15 +150,19 @@ class RoboCasaEnvironment(BaseEnvironment):
 
         task_index = self._task_indices[task.task_id]
         env_name = self.task_list[task_index]
-        episode_seed = int(seed) % np.iinfo(np.uint32).max
+        reset_seed = (None if environment_seed is None else
+                      int(environment_seed) % np.iinfo(np.uint32).max)
         self._close_active_env()
         make_kwargs = dict(self.env_kwargs)
         if self.deterministic_env:
-            make_kwargs['seed'] = episode_seed
+            if reset_seed is None:
+                raise ValueError(
+                    'deterministic RoboCasa reset requires environment_seed')
+            make_kwargs['seed'] = reset_seed
         env = self._runtime.gymnasium.make(env_name, **make_kwargs)
         try:
             if self.deterministic_env:
-                observation, info = env.reset(seed=episode_seed)
+                observation, info = env.reset(seed=reset_seed)
             else:
                 observation, info = env.reset()
             if not isinstance(info, Mapping):
@@ -180,7 +188,8 @@ class RoboCasaEnvironment(BaseEnvironment):
             'env_name': env_name,
             'group': task.metadata['group'],
             'episode_index': episode_index,
-            'episode_seed': episode_seed,
+            'environment_seed': reset_seed,
+            'environment_case_index': environment_case_index,
             'task_description': prompt,
             'action_order': self.action_order,
         })

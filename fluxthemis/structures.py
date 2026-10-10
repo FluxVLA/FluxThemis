@@ -4,13 +4,13 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
-@dataclass(frozen=True)
+@dataclass
 class TaskSpec:
     """A task exposed by an evaluation environment."""
 
     task_id: str
     description: str = ''
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         task_id = str(self.task_id)
@@ -18,8 +18,9 @@ class TaskSpec:
             raise ValueError('task_id cannot be empty')
         if not isinstance(self.metadata, Mapping):
             raise TypeError('task metadata must be a mapping')
-        object.__setattr__(self, 'task_id', task_id)
-        object.__setattr__(self, 'description', str(self.description))
+        self.task_id = task_id
+        self.description = str(self.description)
+        self.metadata = dict(self.metadata)
 
     @classmethod
     def from_value(cls, value: Any) -> 'TaskSpec':
@@ -45,6 +46,7 @@ class StepResult:
     truncated: bool = False
     success: bool | None = None
     info: Mapping[str, Any] = field(default_factory=dict)
+    score: float | None = None
 
 
 @dataclass
@@ -61,7 +63,9 @@ class EpisodeResult:
 
     task_id: str
     episode_index: int
-    seed: int
+    policy_seed: int
+    environment_seed: int | None
+    environment_case_index: int | None
     success: bool
     episode_return: float
     steps: int
@@ -70,3 +74,4 @@ class EpisodeResult:
     model_calls: int
     info: Mapping[str, Any] = field(default_factory=dict)
     prediction_metadata: list[Mapping[str, Any]] = field(default_factory=list)
+    score: float | None = None

@@ -46,25 +46,31 @@ class GymnasiumEnvironment(BaseEnvironment):
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 'GymnasiumEnvironment requires simulation dependencies. '
-                "Install with `pip install -e '.[sim]'`.") from exc
+                'Install with `pip install -e .`.') from exc
         self.env = gymnasium.make(self.env_id, **self.make_kwargs)
 
     def tasks(self) -> Sequence[TaskSpec]:
         return tuple(self._tasks)
 
-    def reset(self, task: TaskSpec, episode_index: int,
-              seed: int) -> tuple[Any, dict]:
+    def reset(self, task: TaskSpec, episode_index: int, *,
+              environment_seed: int | None,
+              environment_case_index: int | None) -> tuple[Any, dict]:
         self._require_setup()
         options = dict(task.metadata.get('reset_options', {}))
         if self.task_option_key is not None:
             options.setdefault(self.task_option_key, task.task_id)
         observation, info = self.env.reset(
-            seed=seed,
+            seed=environment_seed,
             options=options or None,
         )
         if not isinstance(info, Mapping):
             raise TypeError('Gymnasium reset info must be a mapping')
-        return observation, dict(info)
+        reset_info = dict(info)
+        reset_info.update({
+            'environment_seed': environment_seed,
+            'environment_case_index': environment_case_index,
+        })
+        return observation, reset_info
 
     def step(self, action: Any) -> StepResult:
         self._require_setup()
