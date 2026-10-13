@@ -75,7 +75,7 @@ themis = dict(
         unnorm_key='robodojo_arx_x5',
     ),
     evaluation=dict(
-        environment=dict(type='RoboDojoEnvironment'),
+        environment=dict(type='RoboDojoEnvironment', task_name='all'),
         policy_client=dict(type='FluxVLAPolicyClient'),
         reporter=dict(type='FluxVLAEvaluationReporter'),
         evaluator=dict(type='SuccessRateEvaluator'),

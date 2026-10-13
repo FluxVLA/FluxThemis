@@ -65,7 +65,8 @@ bash scripts/distributed_eval.sh \
 
 Each simulator worker dynamically pulls episodes from the shared schedule.
 FluxVLA writes the authoritative journal, task results, summaries, and optional
-Feishu report beside the checkpoint. A worker failure stops the evaluation.
+Feishu report beside the checkpoint. A failed worker is restarted and its
+episode retried.
 
 For multiple simulator nodes, use the same shell launcher with the node
 environment variables and server discovery options documented in the

@@ -226,7 +226,8 @@ class EvaluationRun:
              current_episode: Mapping[str, Any] | None,
              last_result: EpisodeResult | None, error: Mapping[str,
                                                                Any]) -> None:
-        if self._state.status is not EvaluationStatus.RUNNING:
+        if self._state.status not in (EvaluationStatus.RUNNING,
+                                      EvaluationStatus.FINISHED):
             return
         self._stop(status)
         metrics, metrics_error = self._summarize_safely()

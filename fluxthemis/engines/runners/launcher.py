@@ -38,7 +38,7 @@ def run_distributed_evaluation_rank(*,
     deployment_id = (
         deployment_id or os.environ.get('FLUXTHEMIS_DEPLOYMENT_ID')
         or os.environ.get('TORCHELASTIC_RUN_ID'))
-    if not deployment_id:
+    if not deployment_id or deployment_id == 'none':
         stable = (f'{os.environ.get("MASTER_ADDR", "127.0.0.1")}:'
                   f'{os.environ.get("MASTER_PORT", "29500")}:'
                   f'{Path(config_path).resolve()}')
