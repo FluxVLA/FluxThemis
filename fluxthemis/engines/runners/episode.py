@@ -1,3 +1,5 @@
+"""Episode planning and execution."""
+
 from __future__ import annotations
 
 import ctypes

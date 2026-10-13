@@ -164,7 +164,7 @@ class FluxVLAPolicyClient(BasePolicyClient):
         payload['task_description'] = prompt
         header = encode_header(
             'predict_action',
-            deployment_id=self.transport.deployment_id,
+            deployment_id=self.transport.server_deployment_id,
             request_id=request_id,
             policy_seed=self._policy_seed,
             deadline_ms=int(self.transport.request_timeout_s * 1000),

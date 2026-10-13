@@ -55,7 +55,7 @@ class FluxVLAEvaluationReporter(BaseEvaluationReporter):
         request_id = uuid.uuid4().hex
         header = encode_header(
             'report_event',
-            deployment_id=self.transport.deployment_id,
+            deployment_id=self.transport.server_deployment_id,
             request_id=request_id,
             run_session_id=self.run_session_id,
             event_type=event_type,

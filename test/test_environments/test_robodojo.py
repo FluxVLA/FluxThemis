@@ -34,6 +34,7 @@ def test_robodojo_translates_unstable_layout_to_case_rejection():
     environment._episode_task = None
     environment._episode_index = None
     environment._episode_layout_index = None
+    environment._physx_monitor = None
     environment._video_finalized = True
 
     with pytest.raises(

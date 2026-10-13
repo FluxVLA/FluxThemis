@@ -96,8 +96,9 @@ do not duplicate it inside either component mapping.
 
 An `EvaluationRun` owns its validated `EvaluationSettings`, mutable lifecycle
 state, evaluator, and reporter. The coordinator receives that run and only
-schedules jobs across workers. Each simulator worker separately owns its
-environment and `PolicyClient`.
+schedules jobs across workers. Each torchrun rank supervises a disposable
+worker process that owns the simulator environment, `PolicyClient`, and its
+coordinator connection.
 
 Every episode job carries `episode_index`, `policy_seed`, `environment_seed`,
 and `environment_case_index` as separate values. Gymnasium and RoboCasa reset
@@ -154,10 +155,10 @@ distributed scheduler; there is no separate serial or local process-pool path.
 
 ## Multi-Node Evaluation
 
-Run one torchrun job for FluxVLA and another for FluxThemis. Each torchrun rank
-is one Worker; rank 0 also starts that job's Coordinator. The two jobs may use
-different node and GPU counts. ZMQ carries evaluation data; no PyTorch process
-group is created.
+Run one torchrun job for FluxVLA and another for FluxThemis. Each FluxThemis
+rank supervises one disposable Simulator worker; rank 0 also starts the
+evaluation Coordinator. The two jobs may use different node and GPU counts.
+ZMQ carries evaluation data; no PyTorch process group is created.
 
 ```mermaid
 flowchart LR
@@ -169,19 +170,24 @@ flowchart LR
   end
 
   subgraph Themis["FluxThemis · torchrun"]
-    SW["Simulator Workers × M"]
+    WS["Supervisors × M<br/>one torchrun rank per GPU"]
+    SW["Simulator Workers × M<br/>disposable processes"]
     CC["Eval Coordinator<br/>CPU subprocess"]
-    SW <-->|ZMQ :15558| CC
-    SW -. "rank 0 starts" .-> CC
+    WS -->|spawn / restart| SW
+    SW <-->|rollout · ZMQ :15558| CC
+    WS -. "rank 0 starts" .-> CC
   end
 
   SW <-->|inference · ZMQ :15555| SC
   CC <-->|run lifecycle · ZMQ :15555| SC
 ```
 
-Rank 0 remains a Worker and additionally starts its CPU Coordinator. There is
-no Supervisor, and the model Worker count `N` is independent of the simulator
-Worker count `M`.
+Rank 0 remains a Supervisor and additionally starts its CPU Coordinator. A
+Supervisor replaces only its own Simulator worker after a crash or episode
+timeout. The replacement reconnects with the same logical worker identity,
+and the Coordinator requeues the same canonical episode while other
+simulators continue. The model Worker count `N` is independent of the
+simulator count `M`.
 
 H800 model task:
 

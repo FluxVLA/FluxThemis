@@ -242,6 +242,7 @@ def _resolve_task_names(task_name: str | Sequence[str],
 class _PrelaunchRuntime:
     AppLauncher: Any
     OmegaConf: Any
+    get_physx_monitor: Any
     ROOT_DIR: str
     ENV_CONFIG_PATH: str
     BENCHMARK: str
@@ -262,6 +263,7 @@ def _load_prelaunch_runtime() -> _PrelaunchRuntime:
         from env.global_configs import BENCHMARK, ENV_CONFIG_PATH, ROOT_DIR
         from isaaclab.app import AppLauncher
         from omegaconf import OmegaConf
+        from src.eval_client.physx_warning_monitor import get_monitor
         from utils.load_file import load_yaml
         from utils.pipeline_utils import process_config, process_randomization
     except ModuleNotFoundError as exc:
@@ -271,6 +273,7 @@ def _load_prelaunch_runtime() -> _PrelaunchRuntime:
     return _PrelaunchRuntime(
         AppLauncher=AppLauncher,
         OmegaConf=OmegaConf,
+        get_physx_monitor=get_monitor,
         ROOT_DIR=ROOT_DIR,
         ENV_CONFIG_PATH=ENV_CONFIG_PATH,
         BENCHMARK=BENCHMARK,
@@ -393,6 +396,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         self._simulation_app = None
         self._runtime: _PrelaunchRuntime | None = None
         self._post: _PostlaunchRuntime | None = None
+        self._physx_monitor = None
         self._original_cwd: str | None = None
         self._episode_active = False
         self._episode_task: TaskSpec | None = None
@@ -406,6 +410,9 @@ class RoboDojoEnvironment(BaseEnvironment):
         self._prepare_runtime_paths()
         self._configure_run_identity()
         runtime = _load_prelaunch_runtime()
+        physx_monitor = runtime.get_physx_monitor()
+        physx_monitor.start(enabled=True)
+        self._physx_monitor = physx_monitor
         app_launcher = runtime.AppLauncher(
             self._build_app_args(runtime.AppLauncher))
         simulation_app = app_launcher.app
@@ -436,6 +443,8 @@ class RoboDojoEnvironment(BaseEnvironment):
             self._post = None
             self._simulation_app = None
             self._env = None
+            physx_monitor.shutdown()
+            self._physx_monitor = None
             raise
 
     def _create_env_for_active_task(self) -> None:
@@ -510,6 +519,8 @@ class RoboDojoEnvironment(BaseEnvironment):
 
         layout_index = self._nonnegative_integer(environment_case_index,
                                                  'environment_case_index')
+        if self._physx_monitor is not None:
+            self._physx_monitor.reset()
         try:
             self._env.reset(seed=[layout_index])
         except Exception as exc:
@@ -623,6 +634,9 @@ class RoboDojoEnvironment(BaseEnvironment):
             except OSError:
                 pass
             self._original_cwd = None
+        if self._physx_monitor is not None:
+            self._physx_monitor.shutdown()
+            self._physx_monitor = None
         self._video_finalized = True
 
     def _finalize_video(self, task: TaskSpec | None, episode_index: int | None,
@@ -803,7 +817,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         eval_cfg['policy_name'] = 'fluxthemis'
         eval_cfg['additional_info'] = 'fluxthemis'
         eval_cfg['seed'] = self.seed
-        eval_cfg['physx_monitor_enabled'] = False
+        eval_cfg['physx_monitor_enabled'] = True
 
         config = eval_cfg['config']
         config_dir = os.path.join(runtime.ROOT_DIR, 'task', runtime.BENCHMARK,

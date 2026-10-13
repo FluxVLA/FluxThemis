@@ -1,13 +1,12 @@
-from fluxthemis.engines.runners.distributed_rollout import (
+from fluxthemis.engines.runners.coordinator import (
     DistributedEvaluationCoordinator, _SchedulingState, _WorkerSlot)
-from fluxthemis.engines.runners.evaluation import EvaluationSettings
-from fluxthemis.engines.runners.evaluation_run import EvaluationRun
-from fluxthemis.engines.runners.rollout import build_episode_jobs
+from fluxthemis.engines.runners.episode import build_episode_jobs
+from fluxthemis.engines.runners.evaluation import (EvaluationRun,
+                                                   EvaluationSettings)
 from fluxthemis.evaluators import SuccessRateEvaluator
 from fluxthemis.reporters import MockEvaluationReporter
 from fluxthemis.structures import TaskSpec
-from fluxthemis.transports.zmq_protocol import (decode_header, empty_payload,
-                                                encode_header)
+from fluxthemis.transports.zmq_protocol import empty_payload, encode_header
 
 
 class _RouterSocket:
@@ -36,20 +35,22 @@ def _coordinator_with_active_job(job):
     )
     routing_id = b'worker-0'
     slot = _WorkerSlot(
-        routing_id=routing_id,
         worker_id='worker-0',
+        routing_id=routing_id,
+        generation=0,
         device='0',
         task_manifest=(job.task, ),
         current_job=job,
+        simulator_ready=True,
     )
-    coordinator._worker_slots_by_routing_id[routing_id] = slot
-    coordinator._routing_id_by_worker_id[slot.worker_id] = routing_id
+    coordinator._worker_slots[slot.worker_id] = slot
     coordinator._worker_router = _RouterSocket([
         routing_id,
         encode_header(
             'environment_case_rejected',
             deployment_id='deployment',
             worker_id=slot.worker_id,
+            generation=slot.generation,
             episode_id=job.episode_id,
         ),
         empty_payload(),
@@ -83,6 +84,42 @@ def test_rejected_job_requeues_same_slot_with_next_environment_case():
     assert scheduling_state.started_episode_ids == set()
     assert scheduling_state.next_environment_case_index_by_task == {'task': 3}
     assert slot.is_idle
-    response = decode_header(coordinator._worker_router.sent[0][1])
-    assert response['type'] == 'environment_case_rejected_ack'
-    assert response['episode_id'] == job.episode_id
+    assert coordinator._worker_router.sent == []
+
+
+def test_reconnecting_worker_requeues_active_episode():
+    jobs = build_episode_jobs(
+        [TaskSpec('task')],
+        episodes_per_task=1,
+        base_seed=7,
+        run_session_id='run',
+    )
+    job = jobs[0]
+    coordinator, slot, evaluation_run = _coordinator_with_active_job(job)
+    scheduling_state = _SchedulingState.from_jobs(jobs)
+    scheduling_state.pending_jobs.clear()
+    scheduling_state.started_episode_ids.add(job.episode_id)
+    coordinator._scheduling_state = scheduling_state
+    replacement_routing_id = b'worker-0:1'
+    coordinator._worker_router.incoming = [
+        replacement_routing_id,
+        encode_header(
+            'register_worker',
+            deployment_id='deployment',
+            worker_id=slot.worker_id,
+            generation=1,
+            device='0',
+        ),
+        empty_payload(),
+    ]
+
+    coordinator._receive_worker_message(evaluation_run)
+
+    assert scheduling_state.pending_jobs.popleft() == job
+    assert scheduling_state.restart_counts_by_episode_id == {job.episode_id: 1}
+    assert not slot.is_ready
+    assert slot.current_job is None
+    assert slot.routing_id == replacement_routing_id
+    assert slot.generation == 1
+    assert slot.recovery_deadline is not None
+    assert coordinator._worker_router.sent == []

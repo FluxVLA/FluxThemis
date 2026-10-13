@@ -1,4 +1,4 @@
-from fluxthemis.engines.runners.rollout import (build_episode_jobs,
+from fluxthemis.engines.runners.episode import (build_episode_jobs,
                                                 execute_episode)
 from fluxthemis.environments.mock import MockEnvironment
 from fluxthemis.model_clients.mock import MockPolicyClient

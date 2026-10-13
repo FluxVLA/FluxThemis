@@ -11,7 +11,7 @@ class _FakeTransport:
 
     def __init__(self, response_type):
         self.response_type = response_type
-        self.deployment_id = 'deployment'
+        self.server_deployment_id = 'server-deployment'
         self.request_timeout_s = 5.0
         self.setup_requirements = []
         self.requests = []

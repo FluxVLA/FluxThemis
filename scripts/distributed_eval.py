@@ -17,6 +17,7 @@ _LOCAL_GPU_COUNT_ENV_VARS = ('NPROC_PER_NODE', 'MLP_WORKER_GPU')
 DEFAULT_ROLLOUT_BIND = 'tcp://0.0.0.0:15558'
 DEFAULT_STARTUP_TIMEOUT_S = 900.0
 DEFAULT_EPISODE_TIMEOUT_S = 3600.0
+DEFAULT_SIMULATOR_RESTART_LIMIT = 3
 
 
 def _torchrun_environment() -> tuple[int, int, int, str]:
@@ -46,7 +47,6 @@ def parse_args(argv=None):
         default=None,
         help='Override auto-detected local simulator GPUs, for example 0,1.')
     parser.add_argument('--run-name', default=None)
-    parser.add_argument('--work-dir', default=None)
     parser.add_argument('--video-dir', default=None)
     parser.add_argument('--save-videos', action='store_true')
     networking = parser.add_argument_group('advanced networking')
@@ -65,6 +65,12 @@ def parse_args(argv=None):
         '--startup-timeout-s', type=float, default=DEFAULT_STARTUP_TIMEOUT_S)
     reliability.add_argument(
         '--episode-timeout-s', type=float, default=DEFAULT_EPISODE_TIMEOUT_S)
+    reliability.add_argument(
+        '--simulator-restart-limit',
+        type=int,
+        default=DEFAULT_SIMULATOR_RESTART_LIMIT,
+        help='Maximum fresh-process retries for one episode or startup '
+        'sequence (default: 3).')
     parser.add_argument(
         '--cfg-options', nargs='+', action=DictAction, default=None)
     return parser.parse_args(argv)
@@ -140,7 +146,7 @@ def _local_gpu_count(environ: Mapping[str, str]) -> int | None:
 
 
 def main(argv=None) -> int:
-    from fluxthemis.engines.runners.distributed_rollout import \
+    from fluxthemis.engines.runners.launcher import \
         run_distributed_evaluation_rank
 
     args = parse_args(argv)
@@ -151,8 +157,6 @@ def main(argv=None) -> int:
         overrides['themis.transport.endpoint'] = args.server_endpoint
     if args.run_name is not None:
         overrides['themis.evaluation.run_name'] = args.run_name
-    if args.work_dir is not None:
-        overrides['themis.evaluation.work_dir'] = args.work_dir
     if args.video_dir is not None:
         overrides['themis.evaluation.video_dir'] = args.video_dir
     if args.save_videos:
@@ -178,6 +182,7 @@ def main(argv=None) -> int:
         config_overrides=overrides,
         startup_timeout_s=args.startup_timeout_s,
         episode_timeout_s=args.episode_timeout_s,
+        simulator_restart_limit=args.simulator_restart_limit,
         rank=rank,
         world_size=world_size,
     )

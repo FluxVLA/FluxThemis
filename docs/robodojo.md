@@ -62,7 +62,12 @@ FluxVLA writes the official progress-score and success-rate overview at
 environment case indexes. For RoboDojo, a case index selects one layout. An
 unstable layout is rejected before `episode_start`; the coordinator retries
 that episode slot with the next case without counting the rejected attempt. A
-simulator worker failure stops the evaluation.
+RoboDojo's PhysX monitor terminates a disposable Simulator process after a
+fatal CUDA/PhysX failure. The local Supervisor starts a fresh worker, which
+reconnects directly to the coordinator under the same logical identity. The
+coordinator retries the exact episode without stopping other simulators. Use
+`--simulator-restart-limit` to bound retries for one episode or failed startup
+sequence.
 
 For multiple simulator nodes, use the same shell launcher with the node
 environment variables documented in the repository README.

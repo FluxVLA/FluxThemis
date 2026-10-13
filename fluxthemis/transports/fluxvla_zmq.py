@@ -44,13 +44,14 @@ class FluxVLAZMQTransport:
 
         self._context = None
         self._socket = None
-        self._deployment_id: str | None = None
+        self._server_deployment_id: str | None = None
 
     @property
-    def deployment_id(self) -> str:
-        if self._deployment_id is None:
-            raise RuntimeError('FluxVLA ZMQ deployment has not been resolved')
-        return self._deployment_id
+    def server_deployment_id(self) -> str:
+        if self._server_deployment_id is None:
+            raise RuntimeError(
+                'FluxVLA ZMQ server deployment has not been resolved')
+        return self._server_deployment_id
 
     def setup(self, *, require_evaluation_reporting: bool = False) -> None:
         if self._socket is not None:
@@ -103,7 +104,7 @@ class FluxVLAZMQTransport:
         context = self._context
         self._socket = None
         self._context = None
-        self._deployment_id = None
+        self._server_deployment_id = None
         if socket is not None:
             socket.close(linger=0)
         if context is not None:
@@ -140,13 +141,13 @@ class FluxVLAZMQTransport:
                 status = decode_frame(response_payload)
                 if not isinstance(status, Mapping):
                     raise RuntimeError('FluxVLA status response is invalid')
-                deployment_id = nonempty_string(
+                server_deployment_id = nonempty_string(
                     status.get('deployment_id'), 'status.deployment_id')
-                if (self._deployment_id is not None
-                        and deployment_id != self._deployment_id):
-                    raise RuntimeError('FluxVLA deployment changed while '
-                                       'the client was connected')
-                self._deployment_id = deployment_id
+                if (self._server_deployment_id is not None and
+                        server_deployment_id != self._server_deployment_id):
+                    raise RuntimeError('FluxVLA server deployment changed '
+                                       'while the client was connected')
+                self._server_deployment_id = server_deployment_id
                 if status.get('server_mode') != 'stateless':
                     raise RuntimeError('FluxVLA server is not stateless')
                 if (require_evaluation_reporting and
