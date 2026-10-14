@@ -317,7 +317,6 @@ class RoboDojoEnvironment(BaseEnvironment):
     remain owned by the FluxVLA server-side dataset and transforms.
     """
 
-    requires_global_gpu_index = True
     supports_native_video_recording = True
 
     def __init__(self,
