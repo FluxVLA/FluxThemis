@@ -162,14 +162,14 @@ def _is_random_task(task_name: str) -> bool:
     return task_name.endswith(ROBODOJO_RANDOM_SUFFIX)
 
 
-def _is_skippable_robodojo_layout_error(exc: BaseException) -> bool:
-    """Return whether a reset exception means ``skip this layout index``.
+def _is_recoverable_robodojo_case_error(exc: BaseException) -> bool:
+    """Return whether an exception means ``retry with another layout``.
 
     RoboDojo raises ``UnStableError`` for physically unstable pre-generated
-    layouts. Unexpected object-loading and scene-management failures must be
-    surfaced instead of being hidden by repeated soft resets.
+    layouts and ``PhysXBrokenError`` when an active simulation develops an
+    invalid transform. Unexpected failures must still surface normally.
     """
-    return type(exc).__name__ == 'UnStableError'
+    return type(exc).__name__ in {'PhysXBrokenError', 'UnStableError'}
 
 
 def _task_metadata(task_name: str, task_index: int) -> dict[str, Any]:
@@ -523,7 +523,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         try:
             self._env.reset(seed=[layout_index])
         except Exception as exc:
-            if not _is_skippable_robodojo_layout_error(exc):
+            if not _is_recoverable_robodojo_case_error(exc):
                 raise
             self._close_native_env()
             raise EnvironmentCaseRejected(
@@ -559,8 +559,15 @@ class RoboDojoEnvironment(BaseEnvironment):
     def step(self, action: Any) -> StepResult:
         self._require_episode()
         action_dict = self._action_to_dict(action)
-        self._env.take_action(action_dict)
-        observation = robodojo_obs_to_flat(self._env.get_obs())
+        try:
+            self._env.take_action(action_dict)
+            observation = robodojo_obs_to_flat(self._env.get_obs())
+        except Exception as exc:
+            if not _is_recoverable_robodojo_case_error(exc):
+                raise
+            raise EnvironmentCaseRejected(
+                f'RoboDojo layout {self._episode_layout_index} became '
+                'unstable') from exc
         terminated = bool(self._env.end_flag[0])
         success = bool(self._env.success[0]) if terminated else None
         score = self._current_score(success)

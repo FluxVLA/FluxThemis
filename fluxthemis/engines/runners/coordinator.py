@@ -288,10 +288,6 @@ class DistributedEvaluationCoordinator:
             self._release_worker_slot(slot)
         elif message_type == 'environment_case_rejected':
             job = self._require_assigned_job(slot, header)
-            if job.episode_id in scheduling_state.started_episode_ids:
-                raise RuntimeError(
-                    f'worker {slot.worker_id} rejected started episode '
-                    f'{job.episode_id!r}')
             next_case_index = (
                 scheduling_state.next_environment_case_index_by_task.get(
                     job.task.task_id))

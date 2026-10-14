@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import signal
 import time
+import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -157,6 +158,9 @@ class _SimulatorWorker:
                     video_dir=video_dir,
                     video_fps=video_fps,
                 )
+        except BaseException:
+            traceback.print_exc()
+            os._exit(1)
         finally:
             for component in (environment, policy_client):
                 if component is None:
