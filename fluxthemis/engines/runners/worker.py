@@ -26,6 +26,8 @@ from .config import (distributed_video_settings,
                      load_distributed_evaluation_config)
 from .episode import EpisodeJob, configure_worker_lifetime, execute_episode
 
+_SIMULATOR_STARTUP_TIMEOUT_S = 180.0
+
 
 class SimulatorWorkerSupervisor:
     """Restart one disposable simulator worker process when it exits."""
@@ -54,6 +56,7 @@ class SimulatorWorkerSupervisor:
         os.environ['MUJOCO_EGL_DEVICE_ID'] = self.device
         generation = 0
         while True:
+            ready_event = self._context.Event()
             process = self._context.Process(
                 target=_run_simulator_worker,
                 kwargs={
@@ -66,22 +69,40 @@ class SimulatorWorkerSupervisor:
                     'episode_timeout_s': self.episode_timeout_s,
                     'config_overrides': self.config_overrides,
                     'parent_pid': os.getpid(),
+                    'ready_event': ready_event,
                 },
                 name=self.worker_id,
             )
             process.start()
+            startup_timed_out = False
             try:
+                deadline = time.monotonic() + _SIMULATOR_STARTUP_TIMEOUT_S
+                while process.is_alive() and not ready_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    ready_event.wait(timeout=min(1.0, remaining))
+                if process.is_alive() and not ready_event.is_set():
+                    print(
+                        f'[FluxThemis] {self.worker_id} did not become ready '
+                        f'within {_SIMULATOR_STARTUP_TIMEOUT_S:g}s; '
+                        'terminating',
+                        flush=True,
+                    )
+                    startup_timed_out = True
+                    _terminate_process(process)
                 process.join()
             except BaseException:
                 _terminate_process(process)
                 raise
-            if process.exitcode == 0:
+            if process.exitcode == 0 and not startup_timed_out:
                 return
-            exit_code = process.exitcode
+            restart_reason = ('startup timeout' if startup_timed_out else
+                              f'exit code {process.exitcode}')
             generation += 1
             print(
-                f'[FluxThemis] restarting {self.worker_id} after exit code '
-                f'{exit_code} as generation {generation}',
+                f'[FluxThemis] restarting {self.worker_id} after '
+                f'{restart_reason} as generation {generation}',
                 flush=True,
             )
             time.sleep(0.5)
@@ -92,7 +113,8 @@ class _SimulatorWorker:
     def __init__(self, *, config_path: str, rollout_endpoint: str,
                  worker_id: str, deployment_id: str, generation: int,
                  device: str, episode_timeout_s: float,
-                 config_overrides: Mapping[str, Any]) -> None:
+                 config_overrides: Mapping[str,
+                                           Any], ready_event: Any) -> None:
         self.config_path = config_path
         self.rollout_endpoint = rollout_endpoint
         self.worker_id = worker_id
@@ -101,6 +123,7 @@ class _SimulatorWorker:
         self.device = device
         self.episode_timeout_s = episode_timeout_s
         self.config_overrides = config_overrides
+        self.ready_event = ready_event
 
     @property
     def _message_identity(self) -> dict[str, Any]:
@@ -144,6 +167,7 @@ class _SimulatorWorker:
                 encode_header('ready', **self._message_identity),
                 encode_frame({'tasks': [to_jsonable(task) for task in tasks]}),
             ])
+            self.ready_event.set()
             while True:
                 job = self._receive_job(socket)
                 if job is None:
@@ -256,8 +280,8 @@ class _SimulatorWorker:
 def _run_simulator_worker(*, config_path: str, rollout_endpoint: str,
                           worker_id: str, deployment_id: str, generation: int,
                           device: str, episode_timeout_s: float,
-                          config_overrides: Mapping[str, Any],
-                          parent_pid: int) -> None:
+                          config_overrides: Mapping[str, Any], parent_pid: int,
+                          ready_event: Any) -> None:
     configure_worker_lifetime(parent_pid)
     _SimulatorWorker(
         config_path=config_path,
@@ -268,6 +292,7 @@ def _run_simulator_worker(*, config_path: str, rollout_endpoint: str,
         device=device,
         episode_timeout_s=episode_timeout_s,
         config_overrides=config_overrides,
+        ready_event=ready_event,
     ).run()
 
 
