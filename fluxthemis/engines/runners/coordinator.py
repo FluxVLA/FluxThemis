@@ -300,6 +300,7 @@ class DistributedEvaluationCoordinator:
             retry = replace(job, environment_case_index=next_case_index)
             scheduling_state.jobs_by_episode_id[job.episode_id] = retry
             scheduling_state.pending_jobs.appendleft(retry)
+            scheduling_state.started_episode_ids.discard(job.episode_id)
             self._release_worker_slot(slot)
             print(
                 f'[FluxThemis] simulator worker {slot.worker_id} rejected '

@@ -82,7 +82,7 @@ def test_rejected_job_requeues_same_slot_with_next_environment_case():
     assert retry.environment_case_index == 2
     assert scheduling_state.jobs_by_episode_id[job.episode_id] == retry
     assert scheduling_state.results_by_episode_id == {}
-    assert scheduling_state.started_episode_ids == {job.episode_id}
+    assert scheduling_state.started_episode_ids == set()
     assert scheduling_state.next_environment_case_index_by_task == {'task': 3}
     assert slot.is_idle
     assert coordinator._worker_router.sent == []
