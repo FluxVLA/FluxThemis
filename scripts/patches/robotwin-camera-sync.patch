@@ -1,0 +1,16 @@
+--- a/envs/camera/camera.py
++++ b/envs/camera/camera.py
+@@ -274,10 +274,13 @@
+         # camera
+         if self.collect_wrist_camera:
+             self.left_camera.take_picture()
++            self.left_camera.get_picture("Color")
+             self.right_camera.take_picture()
++            self.right_camera.get_picture("Color")
+
+         for camera in self.static_camera_list:
+             camera.take_picture()
++            camera.get_picture("Color")
+
+         # ================================= sensor camera =================================
+         # self.head_sensor.take_picture()

@@ -1,6 +1,5 @@
 """Inspect simulator dependencies, assets and layouts without starting CUDA."""
 
-import hashlib
 import importlib
 import importlib.metadata
 import json
@@ -23,6 +22,11 @@ def check_environment(config_path):
         root = os.environ.get('ROBODOJO_ROOT') or environment['robodojo_root']
         identity = check_robodojo(root)
         assets['assets'] = str(Path(root) / 'Assets')
+    elif kind == 'RoboTwinEnvironment':
+        from .robotwin import check_environment as check_robotwin
+        root = os.environ.get('ROBOTWIN_ROOT') or environment['robotwin_root']
+        identity = check_robotwin(root, environment.get('task_suite', 'all'))
+        assets = identity.pop('asset_roots')
     else:
         packages = sorted((d.metadata['Name'], d.version)
                           for d in importlib.metadata.distributions()
@@ -36,11 +40,10 @@ def check_environment(config_path):
             for path in assets.values():
                 if not Path(path).is_dir():
                     raise ValueError(f'LIBERO input directory missing: {path}')
-        fingerprint = dict(python=sys.version, packages=packages)
         identity = dict(
             status='ok',
-            fingerprint=hashlib.sha256(
-                json.dumps(fingerprint, sort_keys=True).encode()).hexdigest(),
+            python=sys.version,
+            packages=packages,
             coverage='Python/package versions and declared simulator assets')
     identity['asset_roots'] = assets
     return identity

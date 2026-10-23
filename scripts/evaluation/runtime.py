@@ -90,6 +90,8 @@ class ProcessRunner:
             RANK='0')
         if plan['local'].get('robodojo_root'):
             self.env['ROBODOJO_ROOT'] = plan['local']['robodojo_root']
+        if plan['local'].get('robotwin_root'):
+            self.env['ROBOTWIN_ROOT'] = plan['local']['robotwin_root']
         if plan['local'].get('cache'):
             self.env['XDG_CACHE_HOME'] = plan['local']['cache']
         self.env.pop('NPROC_PER_NODE', None)
@@ -163,7 +165,7 @@ class ProcessRunner:
                         if tick:
                             tick()
                         else:
-                            progress.show(f'执行中；日志：{logfile}')
+                            progress.show(f'Running; log: {logfile}')
                         next_update = time.monotonic() + 5
                     time.sleep(.25)
                 if tick:

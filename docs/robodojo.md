@@ -288,9 +288,12 @@ Those environment checks run on actual startup.
 
 ## Progress, Results and Resume
 
-The YAML launcher displays stages, ready model replicas, simulator initialization,
-completed episodes, GPU/CPU/memory, throughput and ETA. ETA uses observed execution
-speed; task duration differences, restarts and scene changes can affect it.
+The YAML launcher displays startup stages, then one updating line with an
+episode progress bar, completed/total count and ETA. Redirected logs record
+progress once per minute, plus status changes and completion. ETA uses the
+current run's observed execution speed; task duration differences, restarts
+and scene changes can affect it. Resource measurements and throughput remain
+in the report files.
 
 Each run creates a separate output directory with the plan and config snapshots,
 `progress.log/json`, `simulator.log`, acknowledged `events.jsonl`, `result.json`,
@@ -317,9 +320,12 @@ from the simulator count, changing that count requires preserving the original
 quota in YAML and omitting `--smoke`. Source, Assets, Python, cache and output paths
 come from the current YAML, allowing migration to a new container.
 
-Resume uses acknowledged events and the frozen config, checking the adapter,
-environment, asset contents and model fingerprint. Provide `model_identity.json`
-via `model.result_dir` from the first run and again for the current model when
+Resume uses acknowledged events and the frozen config, checking recorded runtime
+dependencies, asset contents and the model fingerprint. Repository commits and
+source snapshots do not gate resume. Older manifests are checked against the
+runtime fields they recorded; opaque legacy source fingerprints are ignored.
+Provide `model_identity.json` via `model.result_dir` from the first run and
+again for the current model when
 resuming. Live GPU metrics are not required for identity validation.
 The frozen config expands inherited settings; the new run reuses it with current
 RoboDojo paths and rejects changes to the evaluation protocol. Native FluxVLA status

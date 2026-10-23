@@ -102,6 +102,7 @@ def load_config(path, *, mode=None, overrides=None):
             python=sys.executable,
             config=str(path) if path.suffix == '.py' else None,
             robodojo_root=None,
+            robotwin_root=None,
             assets=None,
             gpu_ids=None,
             workers_per_gpu=1,
@@ -152,6 +153,15 @@ def load_config(path, *, mode=None, overrides=None):
     evaluation = cfg.themis.evaluation
     environment = evaluation.environment
     kind = environment['type']
+    robotwin_tasks = None
+    if kind == 'RoboTwinEnvironment':
+        from fluxthemis.environments.sim.robotwin import RoboTwinEnvironment
+        robotwin_tasks = [
+            t.task_id for t in RoboTwinEnvironment(**{
+                k: v
+                for k, v in environment.items() if k != 'type'
+            }).tasks()
+        ]
     ids = sim['gpu_ids']
     if ids is not None:
         if (not isinstance(ids, list) or not ids or any(
@@ -182,6 +192,8 @@ def load_config(path, *, mode=None, overrides=None):
             'RoboDojoEnvironment': 'put_bottles_into_dustbin',
             'LiberoEnvironment': '0'
         }
+        if robotwin_tasks:
+            smoke_tasks[kind] = robotwin_tasks[0]
         if kind not in smoke_tasks:
             raise ValueError(
                 'Set a smoke task explicitly for this environment')
@@ -190,8 +202,12 @@ def load_config(path, *, mode=None, overrides=None):
     elif mode == 'full':
         task, episodes = 'all', None
     if task is not None:
-        if not isinstance(task, str) or not re.fullmatch(
-                r'[A-Za-z0-9_]+', task):
+        if robotwin_tasks is not None:
+            valid_task = task == 'all' or task in robotwin_tasks
+        else:
+            valid_task = isinstance(task, str) and re.fullmatch(
+                r'[A-Za-z0-9_]+', task)
+        if not valid_task:
             raise ValueError('simulator.task must be a task ID or all')
         if kind == 'RoboDojoEnvironment':
             environment.task_name = task
@@ -203,9 +219,18 @@ def load_config(path, *, mode=None, overrides=None):
         if task in (None, 'all'):
             raise ValueError('An episode override requires one simulator.task')
         evaluation.episodes_per_task = episodes
-        evaluation.setdefault('episodes_per_task_overrides',
-                              {})[task] = episodes
-    robodojo_root = assets = None
+        # ConfigDict.setdefault can return the original default dict instead
+        # of its stored copy. Assign explicitly so new overrides are retained.
+        evaluation.episodes_per_task_overrides = {
+            **evaluation.get('episodes_per_task_overrides', {}), task: episodes
+        }
+    if robotwin_tasks is not None and evaluation.get('task_ids'):
+        selected = evaluation.task_ids
+        selected = ([t.strip() for t in selected.split(',')
+                     if t.strip()] if isinstance(selected, str) else selected)
+        if any(t not in robotwin_tasks for t in selected):
+            raise ValueError('RoboTwin task_ids must belong to task_suite')
+    robodojo_root = robotwin_root = assets = None
     if kind == 'RoboDojoEnvironment':
         value = sim['robodojo_root'] or environment.get(
             'robodojo_root') or os.environ.get('ROBODOJO_ROOT') or str(
@@ -219,6 +244,15 @@ def load_config(path, *, mode=None, overrides=None):
     elif sim['robodojo_root'] is not None or sim['assets'] is not None:
         raise ValueError(
             'robodojo_root/assets launch fields apply only to RoboDojo')
+    if kind == 'RoboTwinEnvironment':
+        value = sim['robotwin_root'] or environment.get(
+            'robotwin_root') or os.environ.get('ROBOTWIN_ROOT') or str(
+                ROOT.parent / 'RoboTwin')
+        robotwin_root = path_value(value, 'simulator.robotwin_root',
+                                   path.parent)
+        environment.robotwin_root = robotwin_root
+    elif sim['robotwin_root'] is not None:
+        raise ValueError('robotwin_root launch field applies only to RoboTwin')
     coord = integer(
         sim['coordinator_port'], 'simulator.coordinator_port', maximum=65534)
     endpoint = overrides.get('server_endpoint')
@@ -262,6 +296,7 @@ def load_config(path, *, mode=None, overrides=None):
             sim['python'], 'simulator.python', path.parent, resolve=False),
         config=config_path,
         robodojo_root=robodojo_root,
+        robotwin_root=robotwin_root,
         assets=assets,
         cache=path_value(sim['cache'], 'simulator.cache', path.parent)
         if sim['cache'] else None,

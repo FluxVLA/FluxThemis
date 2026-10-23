@@ -28,11 +28,6 @@ sys.path.insert(0, str(ROOT))
 def simulator_resources(local):
     try:
         rows = query_gpus(local['gpus'].split(','))
-        for row in rows:
-            print(
-                f'GPU {row["gpu_id"]}: total {row["memory_total_mib"]} MiB; '
-                f'used {row["memory_used_mib"]} MiB',
-                flush=True)
         return dict(status='ok', gpus=rows)
     except Exception as exc:
         print(f'GPU capacity unavailable: {exc}', flush=True)
@@ -49,7 +44,10 @@ def probe(address, workers=None):
             expected=status['workers_expected'],
             deployment=status['deployment_id'])
     except TimeoutError:
-        return dict(state='unreachable', message='尚未收到服务响应；检查远端日志、地址和隧道')
+        return dict(
+            state='unreachable',
+            message=('No service response yet; '
+                     'check remote logs, address and tunnel'))
     except (ValueError, TypeError, RuntimeError) as exc:
         return dict(state='invalid', message=str(exc))
 
@@ -82,6 +80,9 @@ def simulator_arguments(plan):
     if local.get('robodojo_root'):
         command.append('themis.evaluation.environment.robodojo_root=' +
                        local['robodojo_root'])
+    if local.get('robotwin_root'):
+        command.append('themis.evaluation.environment.robotwin_root=' +
+                       local['robotwin_root'])
     if local['save_videos']:
         command += ['--save-videos', '--video-dir', f'{plan["output"]}/videos']
     if plan.get('resume'):
@@ -91,7 +92,8 @@ def simulator_arguments(plan):
 
 def preflight(plan, runtime, progress):
     runtime.connect()
-    progress.show('当前 Python、仿真依赖和资产路径检查通过', 1, 3)
+    progress.show('Python, simulator dependencies and asset paths verified', 1,
+                  3)
     output = Path(plan['output'])
     checks = [('config_check.log', [
         'bash',
@@ -105,8 +107,11 @@ def preflight(plan, runtime, progress):
     for index, (name, command) in enumerate(checks, 2):
         logfile = output / name
         if runtime.run_logged(command, logfile, progress, 120):
-            raise RuntimeError(f'仿真预检失败；见 {logfile}')
-        progress.show(f'{name} 检查通过（尚未运行 GPU）', index, 3)
+            raise RuntimeError(f'Simulator preflight failed; see {logfile}')
+        progress.show(f'{name} passed (GPU not initialized yet)', index, 3)
+    if plan['local']['environment_type'] == 'RoboTwinEnvironment':
+        from preflight.robotwin import check_gpus
+        check_gpus(plan['local'], runtime, progress, output)
 
 
 def wait_remote(plan, runtime, progress):
@@ -121,23 +126,26 @@ def wait_remote(plan, runtime, progress):
         code = runtime.run_logged(command, probe_log, progress, 20,
                                   lambda: None)
         if code:
-            raise RuntimeError(f'连接探测进程失败；日志：{probe_log}')
+            raise RuntimeError(
+                f'Connection probe process failed; log: {probe_log}')
         try:
             status = json.loads(probe_log.read_text().splitlines()[-1])
         except (ValueError, IndexError) as exc:
-            raise RuntimeError(f'无法读取探测状态；日志：{probe_log}') from exc
+            raise RuntimeError(
+                f'Cannot read probe status; log: {probe_log}') from exc
         write_json(Path(plan['output']) / 'remote_status.json', status)
         if status['state'] == 'invalid':
             raise RuntimeError(status['message'])
         if status['state'] == 'unreachable':
-            progress.show(status['message'], status='等待连接')
+            progress.show(status['message'], status='Waiting for connection')
         else:
             plan['deployment'] = status['deployment']
             plan['model_workers'] = status['expected']
             write_json(Path(plan['output']) / 'plan.json', plan)
-            progress.show(f'服务 {status["deployment"]}；模型副本加载进度',
-                          status['ready'], status['expected'],
-                          '已完成' if status['state'] == 'ready' else '加载中')
+            progress.show(
+                f'Service {status["deployment"]}; loading model replicas',
+                status['ready'], status['expected'],
+                'Completed' if status['state'] == 'ready' else 'Loading')
         if status['state'] == 'ready':
             if (plan['local']['scheduling'] == 'fixed'
                     and status['expected'] != plan['simulator_workers']):
@@ -145,7 +153,9 @@ def wait_remote(plan, runtime, progress):
                                  'simulator worker counts')
             return
         time.sleep(3)
-    raise TimeoutError('等待模型超时；检查远端 model.log、IP/端口和网络/隧道')
+    raise TimeoutError(
+        'Timed out waiting for model; check remote model.log, IP/port '
+        'and network/tunnel')
 
 
 def evaluate(plan, runtime, progress):
@@ -164,15 +174,12 @@ def evaluate(plan, runtime, progress):
             text = evaluator_log.read_text(
                 errors='replace') if evaluator_log.exists() else ''
             startup_message = startup.update(text)
-            progress.show(
-                '仿真初始化/场景加载；' + monitor.live_status() + '；' +
-                resources.live_status() + startup_message +
-                f'；日志：{evaluator_log}', len(startup.ready),
-                plan['simulator_workers'], '初始化')
+            progress.show('Simulator workers ready' + startup_message,
+                          len(startup.ready), plan['simulator_workers'],
+                          'Initializing')
         else:
-            successes = sum(row['success'] for row in events.episodes.values())
-            active = ', '.join(sorted(set(events.active.values()))) or '--'
-            rate_message = '吞吐/剩余时间：等待一批 sim 完成'
+            remaining = max(events.total - len(events.episodes), 0)
+            eta_s = None if remaining else 0
             starts = [
                 datetime.fromisoformat(value).timestamp()
                 for key, value in events.episode_starts.items()
@@ -183,26 +190,18 @@ def evaluate(plan, runtime, progress):
             restored_completed = len(events.episodes) - current_completed
             history_target = plan.get('resume', {}).get('completed', 0)
             replaying = restored_completed < history_target
-            history_message = (f'历史回放 {restored_completed}/{history_target}；'
-                               f'本次新完成 {current_completed}；'
-                               if plan.get('resume') else '')
-            if starts and current_completed >= plan['simulator_workers']:
+            if (remaining and not replaying and starts
+                    and current_completed >= plan['simulator_workers']):
                 elapsed = max(time.time() - min(starts), .001)
-                rate = current_completed * 3600 / elapsed
-                remaining = max(events.total - len(events.episodes), 0)
-                remaining_s = remaining / rate * 3600
-                finish = datetime.fromtimestamp(time.time() +
-                                                remaining_s).astimezone()
-                rate_message = (f'吞吐约 {rate:.1f} ep/h；'
-                                f'本轮剩余约 {remaining_s / 3600:.2f} 小时；'
-                                f'预计完成 {finish:%m-%d %H:%M %Z}'
-                                '（按本次实际执行均速外推）')
+                eta_s = remaining * elapsed / current_completed
             progress.show(
-                history_message + f'成功 {successes}/{len(events.episodes)}；'
-                f'当前任务 {active}；{monitor.live_status()}；'
-                f'{resources.live_status()}；{rate_message}',
-                len(events.episodes), events.total, '收尾中' if events.end else
-                ('历史回放' if replaying else '评测中'))
+                'Episodes',
+                len(events.episodes),
+                events.total,
+                'Finalizing' if events.end else
+                ('Restoring' if replaying else 'Evaluating'),
+                live=True,
+                eta_s=eta_s)
 
     if plan['local'].get('cache'):
         Path(plan['local']['cache']).mkdir(parents=True, exist_ok=True)
@@ -214,7 +213,8 @@ def evaluate(plan, runtime, progress):
     result = None
     local_start = None
     try:
-        progress.show('采集运行前 CPU/RAM/GPU 基线（约 3 秒）')
+        progress.show(
+            'Collecting CPU/RAM/GPU baseline before execution (~3 seconds)')
         resources.baseline()
         local_start = time.time()
         monitor.start()
@@ -231,6 +231,7 @@ def evaluate(plan, runtime, progress):
         result['error'] = f'{type(exc).__name__}: {exc}'
         raise
     finally:
+        progress.close()
         resources.stop()
         monitor.stop()
         if result is not None:
@@ -256,7 +257,9 @@ def evaluate(plan, runtime, progress):
                     local_start)
             except Exception as exc:
                 result['performance_report_error'] = str(exc)
-                print(f'性能汇总失败，原始采样已保留：{exc}', flush=True)
+                print(
+                    f'Performance summary failed; raw samples retained: {exc}',
+                    flush=True)
             write_json(output / 'result.json', result)
     return result
 
@@ -269,30 +272,31 @@ def run_plan(plan, progress):
     if plan.get('resume'):
         resume_utils.verify_environment(plan, runtime)
     else:
-        progress.show('记录配置、环境及资产指纹，供中断后恢复使用')
+        progress.show(
+            'Recording config, environment and asset fingerprints for resume')
         resume_utils.freeze_inputs(plan, runtime)
     write_json(output / 'resources.json', simulator_resources(plan['local']))
     progress.enter(3)
-    progress.show(f'连接 {plan["endpoint"]}；模型由用户独立启动')
+    progress.show(f'Connecting to {plan["endpoint"]}; '
+                  'model service is started separately')
     wait_remote(plan, runtime, progress)
     resume_utils.verify_model(plan)
     write_json(output / 'plan.json', plan)
-    print(
-        f'[MODEL_READY] replicas={plan["model_workers"]}; '
-        f'simulators={plan["simulator_workers"]}; endpoint={plan["endpoint"]}',
-        flush=True)
     progress.enter(4)
     result = evaluate(plan, runtime, progress)
     progress.enter(5)
     if not result['complete']:
-        raise RuntimeError(f'评测未完整结束：{result["completed"]}/{result["total"]}；'
-                           f'退出码 {result["simulator_exit_code"]}；'
-                           '见 simulator.log / result.json')
-    progress.show(f'流程完成；任务成功 {result["successes"]}/{result["total"]}', 1, 1,
-                  '已完成')
-    print(f'仿真端结果：{output / "result.json"}\n'
-          f'模型端正式结果：{result["remote_result_dir"]}\n'
-          f'资源与吞吐：{output / "performance_report.txt"}')
+        raise RuntimeError(
+            f'Evaluation incomplete: {result["completed"]}/{result["total"]}; '
+            f'exit code {result["simulator_exit_code"]}; '
+            'see simulator.log / result.json')
+    progress.show(
+        f'Evaluation complete; successful episodes '
+        f'{result["successes"]}/{result["total"]}', result['completed'],
+        result['total'], 'Completed')
+    print(f'Simulator results: {output / "result.json"}\n'
+          f'Model service results: {result["remote_result_dir"]}\n'
+          f'Resources and throughput: {output / "performance_report.txt"}')
     return 0
 
 
@@ -311,7 +315,8 @@ def run_config(config,
         if resume is not None:
             resume = Path(resume).expanduser().resolve()
             if configured_source and resume != Path(configured_source):
-                raise ValueError('--resume 与 YAML resume.from_dir 不一致')
+                raise ValueError(
+                    '--resume does not match YAML resume.from_dir')
         source = resume or configured_source
         if source and not dry_run:
             plan, source_lock = resume_utils.prepare_resume(source, settings)
@@ -374,14 +379,17 @@ def run_config(config,
         run_lock = resume_utils.RunLock(output)
         return run_plan(plan, progress)
     except KeyboardInterrupt:
-        progress.show('用户取消；清理本次仿真进程', status='已取消')
+        progress.show(
+            'Evaluation interrupted; cleaning up simulator processes',
+            status='Cancelled')
         return 130
     except Exception as exc:
-        progress.show(f'{type(exc).__name__}: {exc}', status='失败')
+        progress.show(f'{type(exc).__name__}: {exc}', status='Failed')
         if progress.output:
-            print(f'本次日志：{progress.output}')
+            print(f'Run logs: {progress.output}')
         return 1
     finally:
+        progress.close()
         if run_lock:
             run_lock.close()
         if source_lock:

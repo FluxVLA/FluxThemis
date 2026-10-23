@@ -1,9 +1,7 @@
 """RoboDojo-specific source, package and generated robot-path checks."""
 
-import hashlib
 import importlib
 import importlib.metadata
-import json
 import sys
 from pathlib import Path
 
@@ -39,22 +37,9 @@ def check_environment(root):
             raise ValueError(f'Robot paths need preparation: {target}; run '
                              'utils/update_embodiment_config_path.py in '
                              f'{root} before evaluation')
-    source = {}
-    for folder in ('env', 'env_cfg', 'src', 'task', 'utils'):
-        for path in sorted((root / folder).rglob('*')):
-            if path.is_file() and path.suffix in ('.py', '.yml', '.yaml'):
-                source[str(path.relative_to(root))] = hashlib.sha256(
-                    path.read_text().replace(
-                        str(root), '${ROBODOJO_ROOT}').encode()).hexdigest()
-    installed = sorted((d.metadata['Name'], d.version)
-                       for d in importlib.metadata.distributions()
-                       if d.metadata['Name'])
-    fingerprint = dict(python=sys.version, packages=installed, source=source)
     return dict(
         status='ok',
+        python=sys.version,
         packages=packages,
-        fingerprint=hashlib.sha256(
-            json.dumps(fingerprint, sort_keys=True).encode()).hexdigest(),
-        coverage='Python version, installed package versions, '
-        'RoboDojo env/env_cfg/src/task/utils sources; '
-        'not CUDA driver or all installed binary contents')
+        coverage='Python and simulator package versions; '
+        'not repository sources, CUDA driver or installed binary contents')

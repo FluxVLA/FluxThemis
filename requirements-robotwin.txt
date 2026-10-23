@@ -1,0 +1,34 @@
+# Installed by scripts/install_robotwin.sh into the simulator environment.
+# CUDA torch/torchvision are installed separately; FluxVLA owns model deps.
+# SAPIEN's bundled OIDN is replaced by scripts/robotwin/oidn.py.
+sapien==3.0.0b1
+mplib==0.2.1
+warp-lang==1.12.0
+toppra==0.6.9
+transforms3d==0.4.2
+trimesh==4.4.3
+open3d==0.18.0
+opencv-python==4.11.0.86
+imageio==2.37.3
+imageio-ffmpeg>=0.5,<1
+numpy==1.26.4
+scipy==1.10.1
+h5py>=3.10,<4
+pyglet==1.5.31
+termcolor>=2,<4
+PyYAML>=6,<7
+huggingface-hub>=0.27,<2
+embreex==4.4.0
+manifold3d==3.5.2
+pycollada==0.9.3
+yourdfpy==0.0.60
+# cuRobo is installed with --no-deps; install its runtime/build dependencies here.
+scikit-image==0.24.0
+numpy-quaternion==2023.0.4
+pybind11==2.13.6
+ninja==1.13.0
+importlib_resources==6.5.2
+# Match FluxVLA's validated cuRobo build toolchain.
+setuptools==80.9.0
+setuptools_scm>=8
+pytest>=8,<9

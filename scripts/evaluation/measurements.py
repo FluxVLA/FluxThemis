@@ -196,16 +196,6 @@ class ProcessResourceMonitor:
         return sum(values) if values and all(v is not None
                                              for v in values) else None
 
-    def live_status(self):
-        if not self.rows or time.time() - self.rows[-1]['timestamp'] > 15:
-            return 'sim CPU/PSS: awaiting samples'
-        row = self.rows[-1]
-        cpu = self.total(row, 'cpu_core_equivalents')
-        pss = self.total(row, 'pss_mib')
-        cpu_text = f'{cpu:.1f} cores' if cpu is not None else '--'
-        pss_text = f'{pss / 1024:.1f} GiB' if pss is not None else '--'
-        return f'sim CPU {cpu_text}; PSS {pss_text}'
-
     def summary(self, gpu_report, simulator_log, rollout_window=None):
         baseline = dict(
             host_memory_mib=statistics.median(r['host']['memory_used_mib']
@@ -479,82 +469,92 @@ def write_analysis(plan, result, starts, resource_monitor, gpu_report,
         return '--' if value is None else f'{value / scale:.2f}'
 
     def describe(row, unit='', scale=1):
-        return (f'均值 {show(row["mean"], scale)}、'
-                f'P95 {show(row["p95"], scale)}、'
-                f'峰值 {show(row["peak"], scale)} {unit}')
+        return (f'mean {show(row["mean"], scale)}, '
+                f'P95 {show(row["p95"], scale)}, '
+                f'peak {show(row["peak"], scale)} {unit}')
 
     lines = [
-        '评测资源与吞吐报告',
-        f'完整完成：{result["complete"]}；episode：{len(episodes)}；'
-        f'sim：{plan["simulator_workers"]}；'
-        f'模型副本：{plan["model_workers"]}',
-        f'历史保留：{perf["restored_episodes"]} 局；本次执行：{len(current)} 局；'
-        '以下资源/推理/吞吐均对应本次实际执行窗口。',
-        f'初始化至首局开始：{show(perf["startup_to_first_episode_s"])} 秒；'
-        f'首局开始至最后一局结束：'
-        f'{show(perf["episode_execution_wall_s"])} 秒',
-        f'吞吐：{show(perf["episodes_per_hour"])} ep/h',
-        f'跨恢复累计有效执行时间：{show(cumulative_wall)} 秒；'
-        f'累计吞吐：{show(perf["cumulative_episodes_per_hour"])} ep/h（不含停机等待）',
-        '全量耗时以实际完成窗口为准；部分任务的吞吐不能代表其他任务。',
+        'Evaluation resources and throughput report',
+        f'Complete: {result["complete"]}; episodes: {len(episodes)}; '
+        f'simulator workers: {plan["simulator_workers"]}; '
+        f'model replicas: {plan["model_workers"]}',
+        f'Restored episodes: {perf["restored_episodes"]}; '
+        f'executed this run: {len(current)}; '
+        'resource, inference and throughput figures below cover '
+        'the current execution window.',
+        'Initialization to first episode start: '
+        f'{show(perf["startup_to_first_episode_s"])} seconds; '
+        f'First episode start to last episode end: '
+        f'{show(perf["episode_execution_wall_s"])} seconds',
+        f'Throughput: {show(perf["episodes_per_hour"])} ep/h',
+        'Cumulative execution time across resumes: '
+        f'{show(cumulative_wall)} seconds; '
+        'cumulative throughput: '
+        f'{show(perf["cumulative_episodes_per_hour"])} ep/h '
+        '(excluding downtime)',
+        'Full benchmark duration requires the complete execution window; '
+        'throughput for a subset of tasks does not represent other tasks.',
     ]
     for device, g in resources['gpus'].items():
-        lines.append(f'GPU {device}：基线 '
-                     f'{show(g["baseline_mib"], 1024)} GiB，整卡峰值 '
-                     f'{show(g["whole_gpu_peak_mib"], 1024)} GiB，增量 '
+        lines.append(f'GPU {device}: baseline '
+                     f'{show(g["baseline_mib"], 1024)} GiB, whole-GPU peak '
+                     f'{show(g["whole_gpu_peak_mib"], 1024)} GiB, increment '
                      f'{show(g["incremental_peak_mib"], 1024)} GiB')
     phase = resources['phases']['total']
     cpu_key = 'process_tree_cpu_core_equivalents'
     memory_key = 'process_tree_pss_mib'
-    scope = '仿真进程组'
-    memory_label = '内存 PSS'
+    scope = 'Simulator process tree'
+    memory_label = 'PSS memory'
     lines += [
-        scope + ' CPU（逻辑核当量）：' + describe(phase[cpu_key]),
-        scope + memory_label + '：' + describe(phase[memory_key], 'GiB', 1024),
-        f'整机内存基线：'
-        f'{show(resources["baseline"]["host_memory_mib"], 1024)} GiB；'
-        f'整机内存增量峰值：'
+        scope + ' CPU (logical core equivalents): ' + describe(phase[cpu_key]),
+        scope + ' ' + memory_label + ': ' +
+        describe(phase[memory_key], 'GiB', 1024),
+        f'Host memory baseline: '
+        f'{show(resources["baseline"]["host_memory_mib"], 1024)} GiB; '
+        f'Host memory incremental peak: '
         f'{show(resources["host_memory_incremental_peak_mib"], 1024)} GiB',
     ]
     execution = resources['phases'].get('episode_execution')
     if execution:
-        stage_scope = '进程组'
+        stage_scope = 'process tree'
         lines += [
-            '仅评测阶段' + stage_scope + ' CPU（逻辑核当量）：' +
-            describe(execution[cpu_key]),
-            '仅评测阶段' + stage_scope + memory_label + '：' +
+            'Evaluation phase ' + stage_scope +
+            ' CPU (logical core equivalents): ' + describe(execution[cpu_key]),
+            'Evaluation phase ' + stage_scope + ' ' + memory_label + ': ' +
             describe(execution[memory_key], 'GiB', 1024),
         ]
-    lines.append(f'本地资源采样：{resources["samples"]} 次；'
-                 f'含采样错误：{resources["samples_with_errors"]} 次')
+    lines.append(f'Local resource samples: {resources["samples"]}; '
+                 f'samples with errors: {resources["samples_with_errors"]}')
     for worker in resources['processes']:
         if worker['worker_id']:
-            lines.append(f'{worker["worker_id"]} PID={worker["pid"]}：CPU ' +
-                         describe(worker['cpu_core_equivalents'], '核') +
-                         '；RSS ' + describe(worker['rss_mib'], 'GiB', 1024) +
-                         '；GPU ' +
+            lines.append(f'{worker["worker_id"]} PID={worker["pid"]}: CPU ' +
+                         describe(worker['cpu_core_equivalents'], 'cores') +
+                         '; RSS ' + describe(worker['rss_mib'], 'GiB', 1024) +
+                         '; GPU ' +
                          describe(worker['gpu_memory_mib'], 'GiB', 1024))
     lines += [
-        'CPU 100% = 1 个逻辑核；RSS 包含共享页，不能直接相加。'
-        '进程显存是 NVML compute-app 统计，可能不含独立图形分配。',
-        f'sim 执行时间中的推理等待比例：'
-        f'{show(perf["simulator_predict_wait_fraction"], .01)}%；'
-        f'模型 worker 服务时间占比：'
+        'CPU 100% = one logical core; RSS includes shared pages and cannot '
+        'be summed directly. Process GPU memory uses NVML compute-app '
+        'accounting and may exclude separate graphics allocations.',
+        f'Inference wait fraction of simulator execution time: '
+        f'{show(perf["simulator_predict_wait_fraction"], .01)}%; '
+        f'Model worker service time fraction: '
         f'{show(perf["model_worker_busy_fraction"], .01)}%',
     ]
     for key, latency in perf['latency_s'].items():
-        lines.append(key + '：' + describe(latency, 'ms', .001))
+        lines.append(key + ': ' + describe(latency, 'ms', .001))
     for device, gpu in remote['gpus'].items():
-        lines.append(f'远端 GPU {device} 利用率：' +
+        lines.append(f'Remote GPU {device} utilization: ' +
                      describe(gpu['utilization_pct'], '%'))
     lines += [
-        '远端采样排队长度：' + describe(remote['pending_requests']),
-        '排队长度可能漏掉短暂等待；network_and_queue 包含网络、'
-        '序列化及排队，不能单独视作排队时间。'
+        'Sampled remote queue length: ' + describe(remote['pending_requests']),
+        'Queue sampling may miss short waits; network_and_queue includes '
+        'network, serialization and queueing, so it does not measure '
+        'queueing time alone.'
     ]
     if not remote['samples']:
-        lines.append('远端 GPU 数据缺失：当前不能据此判断 GPU 推理瓶颈。')
+        lines.append('Remote GPU data unavailable; cannot assess GPU '
+                     'inference bottlenecks.')
     text = '\n'.join(lines) + '\n'
     (Path(plan['output']) / 'performance_report.txt').write_text(text)
-    print(text, flush=True)
     return str(path)

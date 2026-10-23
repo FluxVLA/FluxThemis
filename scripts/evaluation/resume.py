@@ -35,27 +35,16 @@ def asset_identity(root):
             continue
         rel = path.relative_to(root)
         template = path.with_name(path.stem + '_tmp' + path.suffix)
-        if rel.parts[0] == 'Robots' and template.is_file():
+        generated = (
+            rel.parts[0] == 'Robots'
+            or (rel.parts[0] == 'embodiments' and path.suffix == '.yml'))
+        if generated and template.is_file():
             continue
         stat = path.stat()
         entries.append([str(rel), stat.st_size, file_hash(path)])
     if not entries:
         raise ValueError('Assets directory is empty')
     return recovery.digest(entries)
-
-
-def environment_identity(kind):
-    files = [
-        ROOT / 'fluxthemis/model_clients/fluxvla_policy.py',
-        ROOT / 'fluxthemis/engines/runners/episode.py'
-    ]
-    adapter = {
-        'RoboDojoEnvironment': 'robodojo',
-        'LiberoEnvironment': 'libero'
-    }.get(kind)
-    if adapter:
-        files.insert(0, ROOT / f'fluxthemis/environments/sim/{adapter}.py')
-    return {str(p.relative_to(ROOT)): file_hash(p) for p in files}
 
 
 def input_assets(plan, runtime):
@@ -77,6 +66,7 @@ def evaluation_settings(cfg):
     evaluation.setdefault('strict_worker_assignment', False)
     evaluation.setdefault('task_ids', None)
     evaluation['environment'].pop('robodojo_root', None)
+    evaluation['environment'].pop('robotwin_root', None)
     for key in ('run_name', 'video_dir', 'save_videos', 'resume_path'):
         evaluation.pop(key, None)
     evaluation['reporter'].pop('event_log', None)
@@ -130,8 +120,6 @@ def freeze_inputs(plan, runtime):
         schema_version=2,
         captured_at=time.time(),
         config_sha256=file_hash(snapshot),
-        environment_files=environment_identity(
-            plan['local']['environment_type']),
         assets_identity=input_assets(plan, runtime),
         native_identity=runtime.identity(),
         model_identity=None)
@@ -195,10 +183,6 @@ def prepare_resume(source, settings):
         snapshot = source / 'config_snapshot.py'
         if file_hash(snapshot) != manifest['config_sha256']:
             raise ValueError('Frozen simulator config changed')
-        kind = settings['local']['environment_type']
-        if environment_identity(kind) != manifest['environment_files']:
-            raise ValueError(
-                'Simulator adapter, policy client or episode code changed')
         from mmengine import Config
         frozen = Config.fromfile(str(snapshot), import_custom_modules=False)
         if evaluation_settings(frozen) != evaluation_settings(
@@ -244,9 +228,13 @@ def prepare_resume(source, settings):
 def verify_environment(plan, runtime):
     manifest = json.loads(
         (Path(plan['output']) / 'recovery_manifest.json').read_text())
-    if runtime.identity(
-    )['fingerprint'] != manifest['native_identity']['fingerprint']:
-        raise ValueError(
-            'Simulator environment changed since the original evaluation')
+    expected = manifest['native_identity']
+    current = runtime.identity()
+    # Legacy fingerprints include repository sources and cannot distinguish
+    # code updates from dependency changes. Compare recorded runtime fields.
+    for field in ('python', 'packages', 'oidn'):
+        if field in expected and expected[field] != current.get(field):
+            raise ValueError(
+                f'Simulator {field} changed since the original evaluation')
     if input_assets(plan, runtime) != manifest['assets_identity']:
         raise ValueError('Assets/layouts changed since the source evaluation')

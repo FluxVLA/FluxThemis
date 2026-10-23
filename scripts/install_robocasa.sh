@@ -285,13 +285,9 @@ prepare_checkout() {
   local remote="$3"
   local allow_asset_link="${4:-0}"
   local target="${SOURCE_ROOT}/${name}"
-  local head
   if [[ -e "${target}" ]]; then
     [[ -d "${target}/.git" ]] || \
       die "managed source path is not a git checkout: ${target}"
-    head="$(git -C "${target}" rev-parse HEAD)"
-    [[ "${head}" == "${ref}" ]] || \
-      die "${target} is at ${head}, expected ${ref}; move it aside and rerun"
     if [[ -n "$(git -C "${target}" status --porcelain)" ]]; then
       if [[ "${allow_asset_link}" != "1" ]] || \
           [[ ! -L "${target}/robocasa/models/assets" ]] || \
@@ -315,8 +311,6 @@ prepare_checkout() {
   CLONE_TMP="$(mktemp -d "${SOURCE_ROOT}/.clone-${name}.XXXXXX")"
   run git clone --no-checkout "${remote}" "${CLONE_TMP}"
   run git -C "${CLONE_TMP}" checkout --detach "${ref}"
-  [[ "$(git -C "${CLONE_TMP}" rev-parse HEAD)" == "${ref}" ]] || \
-    die "failed to resolve ${name} at ${ref}"
   run mv "${CLONE_TMP}" "${target}"
   CLONE_TMP=""
   CHECKOUT_PATH="${target}"
@@ -472,8 +466,6 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 conda_run python -m pip check
-[[ "$(git -C "${ROBOCASA_DIR}" rev-parse HEAD)" == "${ROBOCASA_REF}" ]]
-[[ "$(git -C "${ROBOSUITE_DIR}" rev-parse HEAD)" == "${ROBOSUITE_REF}" ]]
 conda_run python "${PROJECT_ROOT}/scripts/distributed_eval.py" --help \
   >/dev/null
 

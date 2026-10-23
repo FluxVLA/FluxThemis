@@ -54,6 +54,16 @@ cd /root/projects/FluxThemis
 bash scripts/install_robodojo.sh
 ```
 
+For RoboTwin 2.0:
+
+```bash
+conda create -n fluxthemis-robotwin python=3.10 -y
+bash scripts/install_robotwin.sh
+```
+
+See [RoboTwin evaluation](docs/robotwin.md) for model and simulator startup,
+task selection and compatibility notes.
+
 Each simulator installer installs the FluxThemis package into its target
 environment. A separate core environment is not required for evaluation.
 
@@ -71,7 +81,8 @@ SSH tunnel established by your deployment tools.
 Model settings live in FluxVLA. Themis provides a simulator-only RoboDojo
 configuration in [configs/robodojo/arx_x5.py](configs/robodojo/arx_x5.py).
 The evaluation launcher accepts either a Python evaluation config or a launch
-YAML such as [configs/robodojo/remote.yaml](configs/robodojo/remote.yaml).
+YAML such as [configs/robodojo/remote.yaml](configs/robodojo/remote.yaml) or
+[configs/robotwin/remote.yaml](configs/robotwin/remote.yaml).
 YAML holds paths, GPU/worker counts, connection settings and output locations;
 `--smoke` and `--full` select the evaluation scope using the same config.
 
@@ -265,7 +276,12 @@ The two tasks have separate `MASTER_ADDR`, `MASTER_PORT`, ranks, and failure
 boundaries. Simulator nodes connect to the model frontend and their own
 evaluation coordinator; the model frontend can use a reachable private
 address or an established tunnel. The unified launcher waits for model
-readiness and prints replica loading progress.
+readiness and prints replica loading progress. During evaluation it shows one
+updating line: `Episodes [progress bar] completed/total ETA HH:MM:SS`.
+Redirected output records progress once per minute, with immediate updates on
+status changes and completion. Counts include acknowledged completed episodes
+from all simulator workers, including restored episodes. ETA uses only the
+current run's execution speed and stays unknown until enough episodes finish.
 
 The distributed shell launchers use `WORLD_SIZE` as node count, `RANK` as
 node rank, and `MASTER_ADDR` / `MASTER_PORT` for their torchrun job.
@@ -278,8 +294,10 @@ On the MLP platform, they map `MLP_WORKER_NUM`,
 The unified launcher prints `Results: ...` and writes a run directory under
 `--output` or YAML `run.output_root`. It contains the resolved plan and config,
 `simulator.log`, acknowledged `events.jsonl`, `progress.json/log`, `result.json`,
-resource samples and `performance_report.json/txt` with throughput, ETA and
-CPU/GPU measurements. Video recording is enabled with `--save-videos`.
+resource samples and `performance_report.json/txt` with throughput and CPU/GPU
+measurements. `progress.json` holds the latest count and ETA; detailed reports
+are saved without being printed to the terminal. Video recording is enabled
+with `--save-videos`.
 
 To continue an interrupted run, add `--resume /path/to/previous-run` while
 keeping its task and episode quotas. Resume validates the recorded config,
@@ -306,5 +324,5 @@ pytest -q
 pre-commit run --all-files
 ```
 
-See [LIBERO](docs/libero.md), [RoboCasa](docs/robocasa.md), and
-[RoboDojo](docs/robodojo.md).
+See [LIBERO](docs/libero.md), [RoboCasa](docs/robocasa.md),
+[RoboDojo](docs/robodojo.md), and [RoboTwin](docs/robotwin.md).

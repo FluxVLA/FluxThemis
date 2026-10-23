@@ -1,0 +1,24 @@
+# Paths are relative to this YAML file; ~ and ${ENV_VAR} are supported.
+version: 1
+simulator:
+  robotwin_root: ../../../RoboTwin
+  config: aloha.py
+  gpu_ids: [0]
+  workers_per_gpu: 1
+  scheduling: dynamic
+  task: clean/adjust_bottle  # Used when neither --smoke nor --full is given.
+  episodes: 1  # --smoke uses one episode per configured simulator worker.
+  cache: ~/.cache/fluxthemis-robotwin
+  save_videos: false
+  coordinator_port: 15558  # Next port is reserved for simulator torchrun.
+model:
+  host: 127.0.0.1  # Model server address reachable from the simulator.
+  port: 15555
+  wait_seconds: 1800
+  result_dir: null  # Optional model_identity.json for resume.
+  expected_workers: null  # Optional readiness check; does not launch model workers.
+run:
+  output_root: ../../work_dirs/robotwin
+  max_minutes: 0  # No fixed time limit.
+resume:
+  from_dir: null  # Stopped run; task/episodes must match.

@@ -68,7 +68,6 @@ class GpuMonitor:
         self.interval = interval
         self.started_at = self.stopped_at = None
         self.query_errors = 0
-        self.latest = []
         self._stop = threading.Event()
         self._thread = None
 
@@ -91,7 +90,6 @@ class GpuMonitor:
                         samples = query_gpus(self.gpu_ids)
                         writer.writerows(samples)
                         out.flush()
-                        self.latest = samples
                     except (OSError, ValueError,
                             subprocess.SubprocessError) as exc:
                         self._record_error(exc)
@@ -103,8 +101,10 @@ class GpuMonitor:
     def _record_error(self, exc):
         self.query_errors += 1
         if self.query_errors == 1:
+            prefix = '\n' if sys.stderr.isatty() else ''
             print(
-                f'GPU monitoring warning: {exc}; see gpu_monitor_errors.log',
+                f'{prefix}GPU monitoring warning: {exc}; '
+                'see gpu_monitor_errors.log',
                 file=sys.stderr,
                 flush=True)
         try:
@@ -119,14 +119,6 @@ class GpuMonitor:
             # An in-flight query is bounded by its three-second timeout.
             self._thread.join()
         self.stopped_at = time.time()
-
-    def live_status(self):
-        if (not self.latest or time.time() - self.latest[0]['timestamp'] > max(
-                5, 2 * self.interval)):
-            return 'GPU samples unavailable/stale'
-        return '; '.join(
-            f"GPU {s['gpu_id']}: {display(s['utilization_gpu_pct'])}% "
-            f"{display(s['memory_used_mib'])} MiB" for s in self.latest)
 
 
 def epoch(value):
@@ -304,7 +296,3 @@ def summarize(monitor, journal, evaluation_completed):
     report['monitor_status'] = ('unavailable' if not has_samples else 'partial'
                                 if missing or monitor.query_errors else 'ok')
     return report
-
-
-def display(value):
-    return 'N/A' if value is None else f'{value:.1f}'

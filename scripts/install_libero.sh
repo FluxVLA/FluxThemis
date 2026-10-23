@@ -226,15 +226,11 @@ prepare_checkout() {
   local ref="$2"
   local remote="$3"
   local target="${SOURCE_ROOT}/${name}"
-  local head
   if [[ -e "${target}" ]]; then
     [[ -d "${target}/.git" ]] || \
       die "managed source path is not a git checkout: ${target}"
     [[ -z "$(git -C "${target}" status --porcelain)" ]] || \
       die "managed source checkout is dirty: ${target}"
-    head="$(git -C "${target}" rev-parse HEAD)"
-    [[ "${head}" == "${ref}" ]] || \
-      die "${target} is at ${head}, expected ${ref}; move it aside and rerun"
     CHECKOUT_PATH="${target}"
     return
   fi
@@ -251,8 +247,6 @@ prepare_checkout() {
   CLONE_TMP="$(mktemp -d "${SOURCE_ROOT}/.clone-${name}.XXXXXX")"
   run git clone --no-checkout "${remote}" "${CLONE_TMP}"
   run git -C "${CLONE_TMP}" checkout --detach "${ref}"
-  [[ "$(git -C "${CLONE_TMP}" rev-parse HEAD)" == "${ref}" ]] || \
-    die "failed to resolve ${name} at ${ref}"
   run mv "${CLONE_TMP}" "${target}"
   CLONE_TMP=""
   CHECKOUT_PATH="${target}"
@@ -322,8 +316,6 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 conda_run python -m pip check
-[[ "$(git -C "${LIBERO_DIR}" rev-parse HEAD)" == "${LIBERO_REF}" ]]
-[[ "$(git -C "${ROBOSUITE_DIR}" rev-parse HEAD)" == "${ROBOSUITE_REF}" ]]
 conda_run python \
   "${PROJECT_ROOT}/scripts/distributed_eval.py" --help >/dev/null
 
