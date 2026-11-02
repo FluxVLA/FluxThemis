@@ -31,8 +31,16 @@ def check_environment(config_path):
         packages = sorted((d.metadata['Name'], d.version)
                           for d in importlib.metadata.distributions()
                           if d.metadata['Name'])
-        if kind == 'LiberoEnvironment':
-            from libero.libero import get_libero_path
+        if kind in ('LiberoEnvironment', 'LiberoPlusEnvironment'):
+            if kind == 'LiberoPlusEnvironment':
+                from libero_plus_assets import validate_assets
+
+                from fluxthemis.environments.sim.libero_plus import \
+                    _load_libero_plus_runtime
+                runtime = _load_libero_plus_runtime()
+                get_libero_path = runtime.libero.get_libero_path
+            else:
+                from libero.libero import get_libero_path
             assets = {
                 name: get_libero_path(name)
                 for name in ('assets', 'bddl_files', 'init_states')
@@ -40,6 +48,12 @@ def check_environment(config_path):
             for path in assets.values():
                 if not Path(path).is_dir():
                     raise ValueError(f'LIBERO input directory missing: {path}')
+            if kind == 'LiberoPlusEnvironment':
+                validate_assets(Path(assets['assets']))
+                # Classification determines task identity and grouped metrics.
+                assets['classification'] = str(
+                    Path(runtime.benchmark.__file__).with_name(
+                        'task_classification.json'))
         identity = dict(
             status='ok',
             python=sys.version,

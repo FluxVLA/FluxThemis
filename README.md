@@ -31,13 +31,23 @@ python -m pip install -e .
 Evaluation workers run in simulator-specific environments. Choose one
 benchmark environment; do not install all simulator stacks together.
 
-For LIBERO:
+For LIBERO and LIBERO-Plus, use one shared simulator environment:
 
 ```bash
 cd /root/projects/FluxThemis
 conda create -n fluxthemis-libero python=3.10 -y
 bash scripts/install_libero.sh
+# Add LIBERO-Plus to the existing LIBERO environment:
+bash scripts/install_libero_plus.sh
 ```
+
+The Plus installer adds only `requirements-libero-plus.txt`, the Plus package,
+assets and configuration to the existing LIBERO environment. Both variants
+share the same robosuite build; launch each evaluation in its own process
+from `fluxthemis-libero`.
+
+See [LIBERO-Plus evaluation](docs/libero_plus.md) for zero-shot evaluation
+with standard LIBERO checkpoints, task filtering and grouped success rates.
 
 For RoboCasa:
 
@@ -78,11 +88,14 @@ SSH tunnel established by your deployment tools.
 
 ## Configuration
 
-Model settings live in FluxVLA. Themis provides a simulator-only RoboDojo
-configuration in [configs/robodojo/arx_x5.py](configs/robodojo/arx_x5.py).
+Model settings live in FluxVLA. Themis provides simulator-only configurations
+for [RoboDojo](configs/robodojo/arx_x5.py),
+[RoboTwin](configs/robotwin/aloha.py) and
+[LIBERO-Plus LIBERO-10](configs/libero-plus/libero_10.py).
 The evaluation launcher accepts either a Python evaluation config or a launch
-YAML such as [configs/robodojo/remote.yaml](configs/robodojo/remote.yaml) or
-[configs/robotwin/remote.yaml](configs/robotwin/remote.yaml).
+YAML such as [configs/robodojo/remote.yaml](configs/robodojo/remote.yaml),
+[configs/robotwin/remote.yaml](configs/robotwin/remote.yaml) or
+[configs/libero-plus/remote.yaml](configs/libero-plus/remote.yaml).
 YAML holds paths, GPU/worker counts, connection settings and output locations;
 `--smoke` and `--full` select the evaluation scope using the same config.
 

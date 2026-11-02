@@ -12,6 +12,10 @@ conda create -n fluxthemis-libero python=3.10 -y
 bash scripts/install_libero.sh
 ```
 
+Then run `bash scripts/install_libero_plus.sh` to add LIBERO-Plus to this environment.
+Both benchmarks then use `fluxthemis-libero`; select the environment adapter
+in the evaluation config and launch each evaluation in its own process.
+
 For RoboCasa:
 
 ```bash

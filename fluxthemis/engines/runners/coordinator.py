@@ -187,7 +187,8 @@ class DistributedEvaluationCoordinator:
         settings = evaluation_run.settings
         self._strict_worker_assignment = settings.strict_worker_assignment
         selected_tasks = select_tasks(canonical_task_manifest,
-                                      settings.task_ids)
+                                      settings.task_ids,
+                                      settings.task_metadata_filters)
         jobs = build_episode_jobs(
             selected_tasks,
             episodes_per_task=settings.episodes_per_task,
