@@ -77,9 +77,12 @@ class EpisodeJob:
                 f'{expected!r}')
 
 
-def select_tasks(task_manifest: Sequence[TaskSpec],
-                 task_ids: Sequence[str] | None) -> tuple[TaskSpec, ...]:
-    """Validate an environment manifest and apply an optional task filter."""
+def select_tasks(
+    task_manifest: Sequence[TaskSpec],
+    task_ids: Sequence[str] | None,
+    task_metadata_filters: Mapping[str, Sequence[Any]] | None = None
+) -> tuple[TaskSpec, ...]:
+    """Apply task IDs and normalized metadata filters from run settings."""
     tasks = tuple(TaskSpec.from_value(task) for task in task_manifest)
     if not tasks:
         raise ValueError('Environment exposes no evaluation tasks')
@@ -87,14 +90,33 @@ def select_tasks(task_manifest: Sequence[TaskSpec],
     if len(available_ids) != len(set(available_ids)):
         raise ValueError(
             f'Environment returned duplicate task ids: {available_ids}')
-    if task_ids is None:
-        return tasks
-    tasks_by_id = {task.task_id: task for task in tasks}
-    missing = [task_id for task_id in task_ids if task_id not in tasks_by_id]
-    if missing:
+    selected = tasks
+    if task_ids is not None:
+        tasks_by_id = {task.task_id: task for task in tasks}
+        missing = [
+            task_id for task_id in task_ids if task_id not in tasks_by_id
+        ]
+        if missing:
+            raise ValueError(
+                f'Unknown task ids {missing}; available tasks: {available_ids}'
+            )
+        selected = tuple(tasks_by_id[task_id] for task_id in task_ids)
+    if task_metadata_filters is None:
+        return selected
+    known_fields = {str(key) for task in tasks for key in task.metadata}
+    unknown_fields = sorted(set(task_metadata_filters) - known_fields)
+    if unknown_fields:
         raise ValueError(
-            f'Unknown task ids {missing}; available tasks: {available_ids}')
-    return tuple(tasks_by_id[task_id] for task_id in task_ids)
+            f'Unknown task metadata filter fields {unknown_fields}; '
+            f'available fields: {sorted(known_fields)}')
+    selected = tuple(
+        task for task in selected if all(
+            field in task.metadata and any(task.metadata[field] == expected
+                                           for expected in values)
+            for field, values in task_metadata_filters.items()))
+    if not selected:
+        raise ValueError('Task metadata filters selected no tasks')
+    return selected
 
 
 def build_episode_jobs(

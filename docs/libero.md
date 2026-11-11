@@ -14,6 +14,11 @@ cd /root/projects/FluxThemis
 bash scripts/install_libero.sh
 ```
 
+To add LIBERO-Plus to this `fluxthemis-libero` environment, run
+`bash scripts/install_libero_plus.sh` after the base installation. It installs
+the Plus additions and checks both benchmarks in separate processes. See the
+[LIBERO-Plus installation options](libero_plus.md#install) for its assets.
+
 ## Local Run
 
 For independent model/evaluator launch commands, replica counts, scheduling,
