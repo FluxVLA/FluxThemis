@@ -10,19 +10,24 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from evaluation import resume as resume_utils
-from evaluation.config import DEFAULT_CONFIG, load_config
-from evaluation.gpu_monitor import GpuMonitor, query_gpus
-from evaluation.gpu_monitor import summarize as summarize_gpu
-from evaluation.measurements import ProcessResourceMonitor, write_analysis
-from evaluation.progress import (Events, Progress, SimulatorStartupLog,
-                                 write_json)
-from evaluation.runtime import ProcessRunner
-from mmengine import DictAction
-from preflight.environment import check_layouts
-
+# Resolve project imports from this checkout, even with another copy installed.
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# isort: split
+from evaluation import resume as resume_utils  # noqa: E402
+from evaluation.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from evaluation.gpu_monitor import GpuMonitor, query_gpus  # noqa: E402
+from evaluation.gpu_monitor import summarize as summarize_gpu  # noqa: E402
+from evaluation.measurements import ProcessResourceMonitor  # noqa: E402
+from evaluation.measurements import write_analysis  # noqa: E402
+from evaluation.progress import Events  # noqa: E402
+from evaluation.progress import Progress  # noqa: E402
+from evaluation.progress import SimulatorStartupLog  # noqa: E402
+from evaluation.progress import write_json  # noqa: E402
+from evaluation.runtime import ProcessRunner  # noqa: E402
+from mmengine import DictAction  # noqa: E402
+from preflight.environment import check_layouts  # noqa: E402
 
 
 def simulator_resources(local):

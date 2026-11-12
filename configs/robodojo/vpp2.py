@@ -1,7 +1,5 @@
 """RoboDojo evaluation for VPP2's absolute EE16 actions and camera history."""
 
-import os
-
 _base_ = ['./arx_x5.py']
 
 themis = dict(
@@ -14,7 +12,7 @@ themis = dict(
     evaluation=dict(
         environment=dict(
             action_mode='ee',
-            seed=int(os.environ.get('ROBODOJO_EVAL_SEED', '1'))),
+            seed=int('{{$ROBODOJO_EVAL_SEED:1}}')),
         policy_client=dict(
             replan_steps=24,
             history=dict(num_frames=8, stride=25, include_anchor=True)),

@@ -7,7 +7,7 @@ import numpy as np
 from fluxthemis.engines.utils import ENVIRONMENTS
 from fluxthemis.structures import StepResult, TaskSpec
 
-from .base import BaseEnvironment
+from .base import BaseEnvironment, EnvironmentReset
 
 
 @ENVIRONMENTS.register_module()
@@ -86,3 +86,47 @@ class MockEnvironment(BaseEnvironment):
             'task_description':
             (self.current_task.description if self.current_task else ''),
         }
+
+
+@ENVIRONMENTS.register_module()
+class MockVectorEnvironment(BaseEnvironment):
+    """CPU-only slot execution example; does not allocate real simulators."""
+
+    def __init__(self, num_envs: int = 2, **environment_kwargs: Any) -> None:
+        if type(num_envs) is not int or num_envs < 1:
+            raise ValueError('num_envs must be a positive integer')
+        self.num_envs = num_envs
+        self.environments = [
+            MockEnvironment(**environment_kwargs) for _ in range(num_envs)
+        ]
+
+    def tasks(self) -> Sequence[TaskSpec]:
+        return self.environments[0].tasks()
+
+    def setup(self) -> None:
+        for environment in self.environments:
+            environment.setup()
+
+    def reset_batch(
+        self, requests: Sequence[EnvironmentReset | None]
+    ) -> Sequence[tuple[Any, dict] | None]:
+        if len(requests) != self.num_envs:
+            raise ValueError('Reset requests must fill all slots')
+        return [
+            environment.reset_batch([request])[0]
+            for environment, request in zip(self.environments, requests)
+        ]
+
+    def step_batch(
+            self,
+            actions: Sequence[Any | None]) -> Sequence[StepResult | None]:
+        if len(actions) != self.num_envs:
+            raise ValueError('Actions must cover all slots')
+        return [
+            environment.step_batch([action])[0]
+            for environment, action in zip(self.environments, actions)
+        ]
+
+    def close(self) -> None:
+        for environment in self.environments:
+            environment.close()

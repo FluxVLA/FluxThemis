@@ -57,6 +57,13 @@ task and its `_random` variant gets 25 episodes; other tasks get 50.
 See the config for quotas and the [environment task groups](../fluxthemis/environments/sim/robodojo.py)
 for case-sensitive task IDs. Unstable layouts are replaced with spare layouts,
 so available layouts may need to exceed the accepted episode quota.
+This also applies when RoboDojo explicitly invalidates a sample during
+execution, such as an unsuccessful scripted opponent discard in `make_kong`.
+Only that slot is retried with a spare layout; healthy batch slots continue,
+and the invalid sample counts as neither a success nor a failure. The journal
+records the layout replacement while keeping the episode ID and seeds.
+Simulator process crashes retain their bounded retry budget and retry affected
+episodes individually with their recorded layouts.
 
 The default config uses three cameras, 14D joint actions, `base_seed=0`, at most
 2,000 action steps per episode and up to 50 actions per prediction. Policy seeds

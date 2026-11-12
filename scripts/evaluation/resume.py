@@ -3,7 +3,6 @@
 import copy
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 import shutil
@@ -11,11 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location(
-    'episode_recovery', ROOT / 'fluxthemis/engines/runners/resume.py')
-recovery = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(recovery)
+from fluxthemis.engines.runners import resume as recovery
 
 
 def file_hash(path):

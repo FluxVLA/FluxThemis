@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from fluxthemis.engines.utils import to_jsonable
@@ -18,6 +18,7 @@ from fluxthemis.structures import EpisodeResult, TaskSpec
 from ...transports.zmq_protocol import (decode_frame, decode_header,
                                         empty_payload, encode_frame,
                                         encode_header)
+from .assignment import EpisodeAssignment, ExecutionPolicy
 from .episode import EpisodeJob, build_episode_jobs, select_tasks
 from .evaluation import EvaluationRun, EvaluationStatus, utc_now
 
@@ -31,19 +32,23 @@ class _WorkerSlot:
     generation: int
     device: str
     task_manifest: tuple[TaskSpec, ...] = ()
-    current_job: EpisodeJob | None = None
+    capacity: int = 1
+    assignment: EpisodeAssignment | None = None
+    completed_episode_ids: set[str] = field(default_factory=set)
     episode_deadline: float | None = None
     recovery_deadline: float | None = None
     simulator_ready: bool = False
+    restart_pending: bool = False
     startup_restart_count: int = 0
 
     @property
     def is_ready(self) -> bool:
-        return self.simulator_ready and bool(self.task_manifest)
+        return (self.simulator_ready and not self.restart_pending
+                and bool(self.task_manifest))
 
     @property
     def is_idle(self) -> bool:
-        return self.is_ready and self.current_job is None
+        return self.is_ready and self.assignment is None
 
 
 def _next_environment_case_index_by_task(
@@ -67,6 +72,10 @@ class _SchedulingState:
     started_episode_ids: set[str]
     next_environment_case_index_by_task: dict[str, int]
     restart_counts_by_episode_id: dict[str, int]
+    rejection_counts_by_episode_id: dict[str,
+                                         int] = field(default_factory=dict)
+    restored_started_episode_ids: set[str] = field(default_factory=set)
+    replaced_cases_by_episode_id: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_jobs(cls, jobs: tuple[EpisodeJob, ...]) -> _SchedulingState:
@@ -120,6 +129,7 @@ class DistributedEvaluationCoordinator:
         self._context = None
         self._stopping = False
         self._strict_worker_assignment = False
+        self._execution_policy = ExecutionPolicy()
 
     def run(self, evaluation_run: EvaluationRun) -> dict[str, Any]:
         import zmq
@@ -186,6 +196,11 @@ class DistributedEvaluationCoordinator:
                   evaluation_run: EvaluationRun) -> dict[str, Any]:
         settings = evaluation_run.settings
         self._strict_worker_assignment = settings.strict_worker_assignment
+        self._execution_policy = ExecutionPolicy(settings.episode_batch_size)
+        for slot in self._worker_slots.values():
+            if slot.capacity != self._execution_policy.batch_size:
+                raise ValueError(
+                    "Worker capacity differs from episode_batch_size")
         selected_tasks = select_tasks(canonical_task_manifest,
                                       settings.task_ids)
         jobs = build_episode_jobs(
@@ -206,7 +221,10 @@ class DistributedEvaluationCoordinator:
             self._restore_jobs(evaluation_run)
             self._replay_results(evaluation_run)
             self._dispatch_jobs()
-            while not scheduling_state.is_complete:
+            while (not scheduling_state.is_complete
+                   or any(slot.assignment is not None
+                          or slot.recovery_deadline is not None
+                          for slot in self._worker_slots.values())):
                 if self._stopping:
                     raise KeyboardInterrupt
                 now = time.monotonic()
@@ -260,6 +278,8 @@ class DistributedEvaluationCoordinator:
         # Keep the new session's job IDs and canonical seeds. Only layout
         # choices come from recovery, including replacements of rejected cases.
         for key, job in list(state.jobs_by_episode_id.items()):
+            if saved[job.global_episode_number].get('started', False):
+                state.restored_started_episode_ids.add(key)
             state.jobs_by_episode_id[key] = replace(
                 job,
                 environment_case_index=saved[job.global_episode_number]
@@ -322,6 +342,9 @@ class DistributedEvaluationCoordinator:
         self._validate_deployment(header)
         payload = frames[2] if len(frames) > 2 else empty_payload()
         message_type = header['type']
+        if message_type == 'worker_exit':
+            self._handle_worker_exit(routing_id, header)
+            return
         if message_type == 'register_worker':
             self._register_worker(routing_id, header)
             return
@@ -332,48 +355,117 @@ class DistributedEvaluationCoordinator:
             self._mark_worker_ready(slot, payload)
             return
         scheduling_state = self._require_scheduling_state()
-        if message_type == 'episode_start':
+        assignment_id = _required_string(header, 'assignment_id')
+        if (slot.assignment is None
+                or assignment_id != slot.assignment.assignment_id):
+            # A delayed message cannot complete or release a newer attempt,
+            # including retries of exactly the same episode in this process.
+            return
+        if message_type == 'assignment_end':
+            assignment = slot.assignment
+            expected = {job.episode_id for job in assignment.jobs}
+            if slot.completed_episode_ids != expected:
+                raise RuntimeError(
+                    'Worker ended assignment before all results')
+            self._release_worker_slot(slot)
+        elif message_type == 'episode_start':
+            if header.get('episode_id') in slot.completed_episode_ids:
+                return
             job = self._require_assigned_job(slot, header)
-            slot.episode_deadline = self._new_episode_deadline()
             if job.episode_id not in scheduling_state.started_episode_ids:
                 episode_start_payload = job.episode_start_payload(utc_now())
+                replacements = scheduling_state.replaced_cases_by_episode_id
+                previous_case = replacements.get(job.episode_id)
+                if previous_case is not None:
+                    episode_start_payload[
+                        'replaces_environment_case_index'] = previous_case
                 evaluation_run.on_episode_start(episode_start_payload)
                 scheduling_state.started_episode_ids.add(job.episode_id)
+                replacements.pop(job.episode_id, None)
         elif message_type == 'episode_end':
-            job = self._require_assigned_job(slot, header)
+            job = self._require_assigned_job(
+                slot, header, allow_completed=True)
             result = _episode_result_from_wire(decode_frame(payload))
             job.validate_result(result)
-            if job.episode_id in scheduling_state.results_by_episode_id:
+            episode_id = _required_string(header, 'episode_id')
+            saved = scheduling_state.results_by_episode_id.get(episode_id)
+            if saved is not None:
+                if to_jsonable(saved) != to_jsonable(result):
+                    raise RuntimeError(
+                        f'Conflicting duplicate episode result {episode_id!r}')
+                return
+            if job.episode_id not in scheduling_state.started_episode_ids:
                 raise RuntimeError(
-                    f'duplicate episode result {job.episode_id!r}')
+                    'Episode result received before episode start')
             # Report acknowledgement must precede completion and slot reuse;
             # a failed report must not leave an apparently finished job.
             evaluation_run.on_episode_end(result, job.episode_id)
             scheduling_state.results_by_episode_id[job.episode_id] = result
-            self._release_worker_slot(slot)
+            slot.completed_episode_ids.add(job.episode_id)
         elif message_type == 'environment_case_rejected':
+            if header.get('episode_id') in slot.completed_episode_ids:
+                return
             job = self._require_assigned_job(slot, header)
-            next_case_index = (
-                scheduling_state.next_environment_case_index_by_task.get(
-                    job.task.task_id))
-            if next_case_index is None:
-                raise RuntimeError(
-                    f'environment rejected a case for job {job.episode_id!r} '
-                    'without an environment_case_index')
-            scheduling_state.next_environment_case_index_by_task[
-                job.task.task_id] = next_case_index + 1
-            retry = replace(job, environment_case_index=next_case_index)
+            was_started = (
+                job.episode_id in scheduling_state.started_episode_ids
+                or job.episode_id
+                in scheduling_state.restored_started_episode_ids)
+            replace_case = header.get('replace_case', True)
+            if type(replace_case) is not bool:
+                raise ValueError('replace_case must be a boolean')
+            invalidated = header.get('invalidated', False)
+            if type(invalidated) is not bool:
+                raise ValueError('invalidated must be a boolean')
+            if invalidated and (not was_started or not replace_case):
+                raise ValueError(
+                    'Invalid case invalidation before episode start')
+            retry = job
+            if was_started and replace_case and not invalidated:
+                # A previously acknowledged start fixes the initial condition.
+                # A reset failure during recovery retries it within the same
+                # infrastructure budget, without choosing a different layout.
+                self._requeue_restarted_job(job)
+            elif replace_case:
+                count = scheduling_state.rejection_counts_by_episode_id.get(
+                    job.episode_id, 0) + 1
+                settings = evaluation_run.settings
+                limit = settings.environment_case_rejection_limit
+                if count > limit:
+                    raise RuntimeError(
+                        f'Episode {job.episode_id!r} exceeded environment '
+                        f'case rejection limit {limit}')
+                scheduling_state.rejection_counts_by_episode_id[
+                    job.episode_id] = count
+                next_case_index = (
+                    scheduling_state.next_environment_case_index_by_task.get(
+                        job.task.task_id))
+                if next_case_index is None:
+                    raise RuntimeError(f'environment rejected a case for '
+                                       f'job {job.episode_id!r} '
+                                       'without an environment_case_index')
+                scheduling_state.next_environment_case_index_by_task[
+                    job.task.task_id] = next_case_index + 1
+                retry = replace(job, environment_case_index=next_case_index)
+                if invalidated:
+                    scheduling_state.replaced_cases_by_episode_id[
+                        job.episode_id] = job.environment_case_index
+                    scheduling_state.started_episode_ids.discard(
+                        job.episode_id)
+                    scheduling_state.restored_started_episode_ids.discard(
+                        job.episode_id)
+                print(
+                    f'[FluxThemis] simulator worker {slot.worker_id} '
+                    'rejected '
+                    f'environment case {job.environment_case_index} for '
+                    f'{job.task.task_id}; retrying with case '
+                    f'{next_case_index}',
+                    file=sys.stderr,
+                    flush=True,
+                )
             scheduling_state.jobs_by_episode_id[job.episode_id] = retry
-            scheduling_state.pending_jobs.appendleft(retry)
-            scheduling_state.started_episode_ids.discard(job.episode_id)
-            self._release_worker_slot(slot)
-            print(
-                f'[FluxThemis] simulator worker {slot.worker_id} rejected '
-                f'environment case {job.environment_case_index} for '
-                f'{job.task.task_id}; retrying with case {next_case_index}',
-                file=sys.stderr,
-                flush=True,
-            )
+            if invalidated or not (was_started and replace_case):
+                scheduling_state.pending_jobs.append(retry)
+            slot.completed_episode_ids.add(job.episode_id)
         else:
             raise RuntimeError(
                 f'Unknown simulator-worker message {message_type!r}')
@@ -388,6 +480,8 @@ class DistributedEvaluationCoordinator:
             if generation < slot.generation:
                 return
             if generation == slot.generation:
+                if slot.restart_pending:
+                    return
                 raise RuntimeError(
                     f'duplicate simulator worker generation {worker_id!r} '
                     f'generation={generation}')
@@ -410,29 +504,69 @@ class DistributedEvaluationCoordinator:
             device=device,
         )
 
-    def _replace_worker_connection(self, slot: _WorkerSlot, *,
-                                   routing_id: bytes, generation: int) -> None:
-        job = slot.current_job
-        if job is not None:
-            self._requeue_restarted_job(job)
+    def _handle_worker_exit(self, routing_id: bytes,
+                            header: Mapping[str, Any]) -> None:
+        """Decide recovery before a supervisor starts a replacement process."""
+        worker_id = _required_string(header, 'worker_id')
+        generation = _required_nonnegative_int(header, 'generation')
+        slot = self._worker_slots.get(worker_id)
+        if slot is None:
+            # A child can fail before its first registration reaches us.
+            self._register_worker(routing_id, header)
+            slot = self._worker_slots[worker_id]
+        if generation < slot.generation:
+            return
+        if (generation != slot.generation or slot.restart_pending
+                or header.get('device') != slot.device):
+            raise RuntimeError('Invalid simulator exit notification')
+        # Route the eventual shutdown to the waiting supervisor, including
+        # when recovery is rejected. run.fail() persists results first.
+        slot.routing_id = routing_id
+        slot.restart_pending = True
+        self._recover_worker(slot)
+        slot.assignment = None
+        slot.completed_episode_ids.clear()
+        slot.episode_deadline = None
+        slot.simulator_ready = False
+        slot.recovery_deadline = time.monotonic() + self.startup_timeout_s
+        self._idle_worker_ids = deque(value for value in self._idle_worker_ids
+                                      if value != worker_id)
+        self._send_worker_message('restart_worker', slot)
+
+    def _recover_worker(self, slot: _WorkerSlot) -> None:
+        assignment = slot.assignment
+        if assignment is not None:
+            for job in reversed(assignment.jobs):
+                if job.episode_id not in slot.completed_episode_ids:
+                    self._requeue_restarted_job(job)
         elif not slot.simulator_ready:
             slot.startup_restart_count += 1
             if slot.startup_restart_count > self.simulator_restart_limit:
                 raise RuntimeError(
                     f'simulator worker {slot.worker_id!r} exceeded startup '
                     f'restart limit {self.simulator_restart_limit}')
+
+    def _replace_worker_connection(self, slot: _WorkerSlot, *,
+                                   routing_id: bytes, generation: int) -> None:
+        assignment = slot.assignment
+        if not slot.restart_pending:
+            self._recover_worker(slot)
+        slot.restart_pending = False
         self._idle_worker_ids = deque(worker_id
                                       for worker_id in self._idle_worker_ids
                                       if worker_id != slot.worker_id)
         slot.routing_id = routing_id
         slot.generation = generation
-        slot.current_job = None
+        slot.assignment = None
+        slot.completed_episode_ids.clear()
         slot.episode_deadline = None
         slot.recovery_deadline = time.monotonic() + self.startup_timeout_s
         slot.simulator_ready = False
+        assignment_label = (f' assignment={assignment.assignment_id}'
+                            if assignment else '')
         print(
             f'[FluxThemis] simulator worker {slot.worker_id} reconnecting'
-            f'{f" episode={job.episode_id}" if job else ""}: '
+            f'{assignment_label}: '
             f'generation={generation}',
             file=sys.stderr,
             flush=True,
@@ -465,6 +599,11 @@ class DistributedEvaluationCoordinator:
             raise RuntimeError(
                 f'simulator worker {slot.worker_id!r} changed its task '
                 'manifest after restart')
+        capacity = _positive_int(body.get('capacity', 1), 'worker capacity')
+        if slot.task_manifest and slot.capacity != capacity:
+            raise RuntimeError(
+                'Simulator worker changed capacity after restart')
+        slot.capacity = capacity
         slot.task_manifest = task_manifest
         slot.recovery_deadline = None
         slot.simulator_ready = True
@@ -490,24 +629,40 @@ class DistributedEvaluationCoordinator:
                     continue
                 scheduling_state.pending_jobs.remove(job)
                 self._idle_worker_ids.remove(slot.worker_id)
-                self._assign_job(slot, job)
+                self._assign_jobs(slot, (job, ))
             return
         # Default scheduling still gives the next job to any idle worker.
         while scheduling_state.pending_jobs:
             slot = self._next_idle_worker_slot()
             if slot is None:
                 return
-            job = scheduling_state.pending_jobs.popleft()
-            self._assign_job(slot, job)
+            first = scheduling_state.pending_jobs.popleft()
+            jobs = [first]
+            retries = scheduling_state.restart_counts_by_episode_id
+            while (not retries.get(first.episode_id)
+                   and len(jobs) < slot.capacity
+                   and scheduling_state.pending_jobs
+                   and scheduling_state.pending_jobs[0].task == first.task
+                   and not retries.get(
+                       scheduling_state.pending_jobs[0].episode_id)):
+                jobs.append(scheduling_state.pending_jobs.popleft())
+            self._assign_jobs(slot, tuple(jobs))
 
-    def _assign_job(self, slot: _WorkerSlot, job: EpisodeJob) -> None:
-        slot.current_job = job
+    def _assign_jobs(self, slot: _WorkerSlot, jobs: tuple[EpisodeJob,
+                                                          ...]) -> None:
+        assignment = EpisodeAssignment(jobs)
+        ExecutionPolicy(slot.capacity).validate_assignment(assignment)
+        slot.assignment = assignment
+        slot.completed_episode_ids.clear()
         slot.episode_deadline = self._new_episode_deadline()
         self._send_worker_message(
-            'episode_job',
+            'episode_assignment',
             slot,
-            episode_id=job.episode_id,
-            payload=encode_frame(to_jsonable(job)))
+            assignment_id=assignment.assignment_id,
+            payload=encode_frame({
+                'assignment_id': assignment.assignment_id,
+                'jobs': [to_jsonable(job) for job in jobs]
+            }))
 
     def _next_idle_worker_slot(self) -> _WorkerSlot | None:
         while self._idle_worker_ids:
@@ -518,7 +673,8 @@ class DistributedEvaluationCoordinator:
         return None
 
     def _release_worker_slot(self, slot: _WorkerSlot) -> None:
-        slot.current_job = None
+        slot.assignment = None
+        slot.completed_episode_ids.clear()
         slot.episode_deadline = None
         self._idle_worker_ids.append(slot.worker_id)
 
@@ -526,13 +682,18 @@ class DistributedEvaluationCoordinator:
         return (time.monotonic() + self.episode_timeout_s +
                 _SIMULATOR_RESTART_GRACE_S)
 
-    def _require_assigned_job(self, slot: _WorkerSlot,
-                              header: Mapping[str, Any]) -> EpisodeJob:
-        scheduling_state = self._require_scheduling_state()
+    def _require_assigned_job(self,
+                              slot: _WorkerSlot,
+                              header: Mapping[str, Any],
+                              *,
+                              allow_completed: bool = False) -> EpisodeJob:
         episode_id = _required_string(header, 'episode_id')
-        job = scheduling_state.jobs_by_episode_id.get(episode_id)
-        if (job is None or slot.current_job is None
-                or slot.current_job != job):
+        job = next(
+            (job
+             for job in slot.assignment.jobs if job.episode_id == episode_id),
+            None) if slot.assignment else None
+        if (job is None or (not allow_completed
+                            and episode_id in slot.completed_episode_ids)):
             raise RuntimeError(
                 f'worker {slot.worker_id} emitted an unassigned episode '
                 f'{episode_id!r}')
@@ -547,7 +708,7 @@ class DistributedEvaluationCoordinator:
         if slot is None:
             raise RuntimeError(
                 'simulator worker must register before sending data')
-        if generation < slot.generation:
+        if generation < slot.generation or slot.restart_pending:
             return None
         if generation != slot.generation or routing_id != slot.routing_id:
             raise RuntimeError('simulator worker connection mismatch')
@@ -588,9 +749,10 @@ class DistributedEvaluationCoordinator:
 
     def _active_episode_progress(self) -> dict[str, Any] | None:
         jobs = [
-            slot.current_job.episode_start_payload(utc_now())
+            job.episode_start_payload(utc_now())
             for slot in self._worker_slots.values()
-            if slot.current_job is not None
+            if slot.assignment is not None for job in slot.assignment.jobs
+            if job.episode_id not in slot.completed_episode_ids
         ]
         return {'active_episodes': jobs} if jobs else None
 

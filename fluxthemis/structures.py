@@ -47,6 +47,9 @@ class StepResult:
     success: bool | None = None
     info: Mapping[str, Any] = field(default_factory=dict)
     score: float | None = None
+    # The benchmark explicitly invalidated this initial condition. It must
+    # be replaced without recording a policy success or failure.
+    case_rejected: bool = False
 
 
 @dataclass

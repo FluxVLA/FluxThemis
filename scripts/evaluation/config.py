@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from mmengine import Config
 
+from fluxthemis.engines.runners.assignment import ExecutionPolicy
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / 'configs/robodojo/remote.yaml'
 
@@ -153,6 +155,7 @@ def load_config(path, *, mode=None, overrides=None):
     evaluation = cfg.themis.evaluation
     environment = evaluation.environment
     kind = environment['type']
+    execution_policy = ExecutionPolicy(evaluation.get('episode_batch_size', 1))
     robotwin_tasks = None
     if kind == 'RoboTwinEnvironment':
         from fluxthemis.environments.sim.robotwin import RoboTwinEnvironment
@@ -198,7 +201,7 @@ def load_config(path, *, mode=None, overrides=None):
             raise ValueError(
                 'Set a smoke task explicitly for this environment')
         task = smoke_tasks[kind]
-        episodes = total_workers
+        episodes = total_workers * execution_policy.batch_size
     elif mode == 'full':
         task, episodes = 'all', None
     if task is not None:
@@ -291,6 +294,9 @@ def load_config(path, *, mode=None, overrides=None):
         sim['save_videos'] if sim['save_videos'] is not None else
         evaluation.get('save_videos', False))
     evaluation.save_videos = save_videos
+    execution_policy.validate_options(
+        save_videos=save_videos,
+        strict_worker_assignment=evaluation.strict_worker_assignment)
     local = dict(
         python=path_value(
             sim['python'], 'simulator.python', path.parent, resolve=False),

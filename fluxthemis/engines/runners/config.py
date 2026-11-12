@@ -16,6 +16,7 @@ from fluxthemis.engines.utils import (build_evaluation_reporter_from_cfg,
                                       build_evaluator_from_cfg)
 
 from ...transports.fluxvla_zmq import connection_transport
+from .assignment import ExecutionPolicy
 from .evaluation import EvaluationRun, EvaluationSettings
 
 _EVALUATION_SETTING_NAMES = {
@@ -65,6 +66,8 @@ def distributed_video_settings(
     save_videos = evaluation_cfg.get('save_videos', False)
     if not isinstance(save_videos, bool):
         raise TypeError('themis.evaluation.save_videos must be a boolean')
+    ExecutionPolicy(evaluation_cfg.get(
+        'episode_batch_size', 1)).validate_options(save_videos=save_videos)
     video_fps = _positive_int(
         evaluation_cfg.get('video_fps', 20), 'themis.evaluation.video_fps')
     if not save_videos:
