@@ -27,6 +27,14 @@ def check_environment(config_path):
         root = os.environ.get('ROBOTWIN_ROOT') or environment['robotwin_root']
         identity = check_robotwin(root, environment.get('task_suite', 'all'))
         assets = identity.pop('asset_roots')
+    elif kind == 'RoboLabEnvironment':
+        from .robolab import check_environment as check_robolab
+        root = os.environ.get('ROBOLAB_ROOT') or environment.get(
+            'robolab_root')
+        if not root:
+            raise ValueError('RoboLab requires robolab_root or ROBOLAB_ROOT')
+        identity = check_robolab(root, environment['task_name'])
+        assets = identity.pop('asset_roots')
     else:
         packages = sorted((d.metadata['Name'], d.version)
                           for d in importlib.metadata.distributions()

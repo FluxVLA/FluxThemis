@@ -64,6 +64,9 @@ bash scripts/install_robotwin.sh
 See [RoboTwin evaluation](docs/robotwin.md) for model and simulator startup,
 task selection and compatibility notes.
 
+For RoboLab, see [RoboLab remote evaluation](docs/robolab.md) for the official
+simulator installer and single-environment remote configuration.
+
 Each simulator installer installs the FluxThemis package into its target
 environment. A separate core environment is not required for evaluation.
 

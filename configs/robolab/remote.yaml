@@ -1,0 +1,24 @@
+version: 1
+simulator:
+  python: ${ROBOLAB_PYTHON}
+  config: droid.py
+  robolab_root: ${ROBOLAB_ROOT}
+  gpu_ids: [0]
+  workers_per_gpu: 1
+  task: all
+  episodes: null
+  scheduling: dynamic
+  save_videos: false
+  simulator_restart_limit: 0
+  episode_timeout_s: 3600
+  coordinator_port: 15558
+model:
+  host: 127.0.0.1
+  port: 15555
+  wait_seconds: 1800
+  expected_workers: 1
+run:
+  output_root: ../../work_dirs/robolab
+  max_minutes: 0
+resume:
+  from_dir: null

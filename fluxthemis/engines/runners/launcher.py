@@ -46,6 +46,7 @@ def run_distributed_evaluation_rank(*,
 
     coordinator_process = None
     coordinator_monitor = None
+    shutdown_requested = threading.Event()
     if rank == 0:
         context = multiprocessing.get_context('spawn')
         coordinator_process = context.Process(
@@ -66,7 +67,7 @@ def run_distributed_evaluation_rank(*,
         coordinator_process.start()
         coordinator_monitor = threading.Thread(
             target=_monitor_coordinator_process,
-            args=(coordinator_process, os.getpid()),
+            args=(coordinator_process, os.getpid(), shutdown_requested),
             daemon=True,
         )
         coordinator_monitor.start()
@@ -81,8 +82,10 @@ def run_distributed_evaluation_rank(*,
             episode_timeout_s=episode_timeout_s,
             startup_timeout_s=startup_timeout_s,
             config_overrides=config_overrides,
+            restart_on_failure=simulator_restart_limit != 0,
         ).run()
     except BaseException:
+        shutdown_requested.set()
         if coordinator_process is not None:
             if coordinator_process.is_alive():
                 coordinator_process.terminate()
@@ -93,9 +96,13 @@ def run_distributed_evaluation_rank(*,
             coordinator_monitor.join()
 
 
-def _monitor_coordinator_process(process: multiprocessing.Process,
-                                 parent_pid: int) -> None:
+def _monitor_coordinator_process(
+        process: multiprocessing.Process,
+        parent_pid: int,
+        shutdown_requested: threading.Event | None = None) -> None:
     process.join()
+    if shutdown_requested is not None and shutdown_requested.is_set():
+        return
     if process.exitcode not in {0, -signal.SIGTERM}:
         print(
             f'[FluxThemis] coordinator exited with code {process.exitcode}',

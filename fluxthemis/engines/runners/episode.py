@@ -324,7 +324,8 @@ def validate_action_chunk(action_chunk: ActionChunk) -> np.ndarray:
     if not isinstance(action_chunk, ActionChunk):
         raise TypeError(
             'PolicyClient.predict_action() must return an ActionChunk')
-    actions = np.asarray(action_chunk.actions, dtype=np.float32)
+    _validate_action_type(action_chunk.actions)
+    actions = np.asarray(action_chunk.actions)
     if actions.ndim != 2:
         raise ValueError(
             f'PolicyClient actions must have shape [T, A], got {actions.shape}'
@@ -333,4 +334,17 @@ def validate_action_chunk(action_chunk: ActionChunk) -> np.ndarray:
         raise ValueError('PolicyClient returned an empty action chunk')
     if not np.isfinite(actions).all():
         raise ValueError('PolicyClient returned NaN or infinite actions')
+    with np.errstate(over='ignore'):
+        actions = actions.astype(np.float32, copy=False)
+    if not np.isfinite(actions).all():
+        raise ValueError('PolicyClient actions are outside the FP32 range')
     return actions
+
+
+def _validate_action_type(value: Any) -> None:
+    # Check before coercion so mixed bool/float sequences cannot become valid.
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_action_type(item)
+    elif np.asarray(value).dtype.kind not in 'fiu':
+        raise TypeError('PolicyClient actions must contain real numbers')

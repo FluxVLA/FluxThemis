@@ -32,16 +32,19 @@ _SIMULATOR_STARTUP_TIMEOUT_S = 180.0
 class SimulatorWorkerSupervisor:
     """Restart one disposable simulator worker process when it exits."""
 
-    def __init__(
-            self,
-            config_path: str,
-            rollout_endpoint: str,
-            worker_id: str,
-            deployment_id: str,
-            device: str,
-            episode_timeout_s: float,
-            config_overrides: Mapping[str, Any] | None = None,
-            startup_timeout_s: float = _SIMULATOR_STARTUP_TIMEOUT_S) -> None:
+    def __init__(self,
+                 config_path: str,
+                 rollout_endpoint: str,
+                 worker_id: str,
+                 deployment_id: str,
+                 device: str,
+                 episode_timeout_s: float,
+                 config_overrides: Mapping[str, Any] | None = None,
+                 startup_timeout_s: float = _SIMULATOR_STARTUP_TIMEOUT_S,
+                 restart_on_failure: bool = True) -> None:
+        if not isinstance(restart_on_failure, bool):
+            raise TypeError("restart_on_failure must be a bool")
+        self.restart_on_failure = restart_on_failure
         self.config_path = config_path
         self.rollout_endpoint = _endpoint(rollout_endpoint, 'rollout_endpoint')
         self.worker_id = _nonempty(worker_id, 'worker_id')
@@ -110,6 +113,10 @@ class SimulatorWorkerSupervisor:
                 return
             restart_reason = ('startup timeout' if startup_timed_out else
                               f'exit code {process.exitcode}')
+            if not self.restart_on_failure:
+                raise RuntimeError(
+                    f'Simulator {self.worker_id} failed ({restart_reason}); '
+                    'restarting is disabled')
             generation += 1
             print(
                 f'[FluxThemis] restarting {self.worker_id} after '

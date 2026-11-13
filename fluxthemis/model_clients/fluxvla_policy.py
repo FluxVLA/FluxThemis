@@ -276,10 +276,17 @@ class FluxVLAPolicyClient(BasePolicyClient):
         body = decode_frame(payload)
         if not isinstance(body, Mapping) or body.get('actions') is None:
             raise RuntimeError('FluxVLA predict response missing actions')
-        actions = np.asarray(body['actions'], dtype=np.float32)
+        _validate_action_type(body['actions'])
+        actions = np.asarray(body['actions'])
         if actions.ndim != 2 or actions.shape[0] == 0 or actions.shape[1] == 0:
             raise RuntimeError(
                 f'FluxVLA actions must have shape [T, A], got {actions.shape}')
+        if not np.isfinite(actions).all():
+            raise RuntimeError('FluxVLA returned NaN or infinite actions')
+        with np.errstate(over='ignore'):
+            actions = actions.astype(np.float32, copy=False)
+        if not np.isfinite(actions).all():
+            raise RuntimeError('FluxVLA actions are outside the FP32 range')
         return actions, float(header.get('inference_time_s', 0.0))
 
     @staticmethod
@@ -326,6 +333,15 @@ class FluxVLAPolicyClient(BasePolicyClient):
             raise ValueError(
                 f'Observation state {name!r} contains NaN or infinity')
         return state
+
+
+def _validate_action_type(value: Any) -> None:
+    # A mixed Python sequence can lose its bool elements during coercion.
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_action_type(item)
+    elif np.asarray(value).dtype.kind not in 'fiu':
+        raise TypeError('FluxVLA actions must contain real numbers')
 
 
 __all__ = ['FluxVLAPolicyClient']

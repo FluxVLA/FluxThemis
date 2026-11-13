@@ -75,3 +75,6 @@ evaluation-level `video_dir`.
 Use the same two shell launchers. See ``Multi-Node Evaluation`` in the
 repository README for the required node environment variables and discovery
 options.
+
+For RoboLab, use the [single-environment guide](robolab.md) and shared
+`configs/robolab/remote.yaml` launcher configuration.

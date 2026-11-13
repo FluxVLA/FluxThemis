@@ -73,6 +73,10 @@ def simulator_arguments(plan):
         f'tcp://127.0.0.1:{local["port"]}',
         '--startup-timeout-s',
         str(plan['wait_s']),
+        '--episode-timeout-s',
+        str(local.get('episode_timeout_s', 3600)),
+        '--simulator-restart-limit',
+        str(local.get('simulator_restart_limit', 3)),
         '--cfg-options',
         f'themis.evaluation.reporter.event_log={plan["output"]}/events.jsonl',
         f'themis.transport.connect_timeout_s={plan["wait_s"]}',
@@ -83,6 +87,9 @@ def simulator_arguments(plan):
     if local.get('robotwin_root'):
         command.append('themis.evaluation.environment.robotwin_root=' +
                        local['robotwin_root'])
+    if local.get('robolab_root'):
+        command.append('themis.evaluation.environment.robolab_root=' +
+                       local['robolab_root'])
     if local['save_videos']:
         command += ['--save-videos', '--video-dir', f'{plan["output"]}/videos']
     if plan.get('resume'):
@@ -311,6 +318,8 @@ def run_config(config,
     try:
         progress.enter(1)
         settings = load_config(config, mode=mode, overrides=overrides)
+        kind = settings['local']['environment_type']
+        is_robolab = kind == 'RoboLabEnvironment'
         configured_source = settings['resume']['from_dir']
         if resume is not None:
             resume = Path(resume).expanduser().resolve()
@@ -318,6 +327,8 @@ def run_config(config,
                 raise ValueError(
                     '--resume does not match YAML resume.from_dir')
         source = resume or configured_source
+        if source and is_robolab:
+            raise ValueError('RoboLab resume is unsupported')
         if source and not dry_run:
             plan, source_lock = resume_utils.prepare_resume(source, settings)
             if plan is None:
@@ -339,6 +350,9 @@ def run_config(config,
                 local=settings['local'],
                 simulator_workers=settings['simulator_workers'])
             snapshot = output / 'config_snapshot.py'
+            if is_robolab:
+                environment = settings['config'].themis.evaluation.environment
+                environment.output_dir = str(output / 'native')
             settings['config'].dump(str(snapshot))
             plan['local']['frozen_config'] = str(snapshot)
         plan.update(
