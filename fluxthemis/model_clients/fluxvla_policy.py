@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from fluxthemis.engines.utils import POLICY_CLIENTS
-from fluxthemis.structures import ActionChunk, TaskSpec
+from fluxthemis.structures import ActionChunk, PolicyStop, TaskSpec
 from fluxthemis.transports.fluxvla_zmq import (CONNECTION_TRANSPORT_FIELDS,
                                                FluxVLAZMQTransport,
                                                connection_transport,
@@ -54,9 +54,17 @@ class FluxVLAPolicyClient(BasePolicyClient):
 
     def __init__(self,
                  transport: Mapping[str, Any],
+                 send_policy_context: bool = False,
+                 send_environment_feedback: bool = True,
                  *,
                  history: Mapping[str, Any] | None = None,
                  replan_steps: int = 24) -> None:
+        if not isinstance(send_policy_context, bool):
+            raise TypeError('send_policy_context must be a boolean')
+        self.send_policy_context = send_policy_context
+        if not isinstance(send_environment_feedback, bool):
+            raise TypeError('send_environment_feedback must be a boolean')
+        self.send_environment_feedback = send_environment_feedback
         if not isinstance(transport, Mapping):
             raise TypeError('transport must be a mapping')
         values = dict(transport)
@@ -87,6 +95,7 @@ class FluxVLAPolicyClient(BasePolicyClient):
         self._policy_seed: int | None = None
         self._prediction_sequence = 0
         self.last_profile: dict[str, float] = {}
+        self._response_metadata: dict[str, Any] = {}
         self._history_enabled = history is not None
         if self._history_enabled:
             if not isinstance(history, Mapping):
@@ -113,6 +122,13 @@ class FluxVLAPolicyClient(BasePolicyClient):
 
     def setup(self) -> None:
         self.transport.setup()
+        stateful = (
+            getattr(self.transport, 'server_mode', 'stateless') == 'stateful')
+        if stateful != self.send_policy_context:
+            self.transport.close()
+            raise RuntimeError('Client send_policy_context must match the '
+                               'FluxVLA server mode. Restart both sides with '
+                               'the same planner/plain-VLA config.')
 
     def reset(self, task: TaskSpec, episode_index: int,
               policy_seed: int) -> None:
@@ -163,7 +179,7 @@ class FluxVLAPolicyClient(BasePolicyClient):
         self._prediction_sequence = 0
 
     def predict_action(self, observation: Any,
-                       context: Mapping[str, Any]) -> ActionChunk:
+                       context: Mapping[str, Any]) -> ActionChunk | PolicyStop:
         if not isinstance(observation, Mapping):
             raise TypeError('FluxVLA ZMQ observations must be mappings')
         if not isinstance(context, Mapping):
@@ -193,20 +209,20 @@ class FluxVLAPolicyClient(BasePolicyClient):
             'server_infer_s': server_infer_s,
             'network_and_queue_s': max(roundtrip_s - server_infer_s, 0.0),
         }
-        result = ActionChunk(
-            actions=actions,
-            metadata={
-                'profile': dict(self.last_profile),
-                'request_id': request_id,
-                'episode_id': self._episode_id,
-                'sequence': self._prediction_sequence,
-                'policy_seed': self._policy_seed,
-                'denormalized': True,
-            },
-        )
+        metadata = {
+            'profile': dict(self.last_profile),
+            'request_id': request_id,
+            'episode_id': self._episode_id,
+            'sequence': self._prediction_sequence,
+            'policy_seed': self._policy_seed,
+            'denormalized': True,
+            'policy': dict(self._response_metadata),
+        }
+        if isinstance(actions, PolicyStop):
+            return PolicyStop(actions.status, actions.reason, metadata)
         if self._history_enabled:
             self._replan_index += 1
-        return result
+        return ActionChunk(actions=actions, metadata=metadata)
 
     def close(self) -> None:
         try:
@@ -256,6 +272,22 @@ class FluxVLAPolicyClient(BasePolicyClient):
                 ])
             payload['history_steps'] = np.asarray(steps, dtype=np.int64)
             payload['replan_index'] = self._replan_index
+        if self.send_policy_context:
+            if context.get('episode_id') != self._episode_id:
+                raise ValueError('Policy context episode_id mismatch')
+            info = context.get('info', {})
+            step = info.get('step',
+                            0 if self._prediction_sequence == 1 else None)
+            if type(step) is not int or step < 0:
+                raise ValueError('Policy context requires actual info.step')
+            payload['policy_context'] = dict(
+                episode_id=self._episode_id,
+                sequence=self._prediction_sequence,
+                observation_id=step)
+            # Legacy measured predicates are optional. Agent mode disables
+            # this; the context above acknowledges actual execution only.
+            if self.send_environment_feedback:
+                payload['predicates'] = dict(observation.get('predicates', {}))
         header = encode_header(
             'predict_action',
             deployment_id=self.transport.server_deployment_id,
@@ -268,13 +300,29 @@ class FluxVLAPolicyClient(BasePolicyClient):
         )
         return header, encode_frame(payload)
 
-    def _validate_response(self, header: Mapping[str, Any], payload: bytes,
-                           request_id: str) -> tuple[np.ndarray, float]:
+    def _validate_response(
+            self, header: Mapping[str, Any], payload: bytes,
+            request_id: str) -> tuple[np.ndarray | PolicyStop, float]:
         self.transport.validate_response(header, request_id)
         if header.get('type') != 'predict_response':
             raise RuntimeError('FluxVLA returned an invalid prediction type')
         body = decode_frame(payload)
-        if not isinstance(body, Mapping) or body.get('actions') is None:
+        if not isinstance(body, Mapping):
+            raise RuntimeError('FluxVLA predict response must be a mapping')
+        metadata = body.get('metadata', {})
+        if not isinstance(metadata, Mapping):
+            raise RuntimeError('FluxVLA prediction metadata must be a mapping')
+        self._response_metadata = dict(metadata)
+        if 'policy_stop' in body:
+            if not self.send_policy_context or 'actions' in body:
+                raise RuntimeError('Unexpected or ambiguous policy stop')
+            stop = body['policy_stop']
+            if not isinstance(stop, Mapping) or set(stop) != {
+                    'status', 'reason'
+            }:
+                raise RuntimeError('Invalid policy stop payload')
+            return PolicyStop(**stop), float(header.get('inference_time_s', 0))
+        if body.get('actions') is None:
             raise RuntimeError('FluxVLA predict response missing actions')
         actions = np.asarray(body['actions'], dtype=np.float32)
         if actions.ndim != 2 or actions.shape[0] == 0 or actions.shape[1] == 0:

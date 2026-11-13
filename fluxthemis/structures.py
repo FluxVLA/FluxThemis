@@ -58,6 +58,28 @@ class ActionChunk:
 
 
 @dataclass
+class PolicyStop:
+    """Expected episode stop without actions, never proof of task success."""
+
+    status: str
+    reason: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, str) or self.status not in {
+                'blocked', 'failed', 'waiting', 'rejected', 'succeeded',
+                'timeout', 'cancelled', 'completed'
+        }:
+            raise ValueError('Invalid policy stop status')
+        if (not isinstance(self.reason, str) or not self.reason.strip()
+                or len(self.reason) > 256):
+            raise ValueError('Policy stop reason must be a short string')
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError('Policy stop metadata must be a mapping')
+        self.metadata = dict(self.metadata)
+
+
+@dataclass
 class EpisodeResult:
     """Serializable result of one task episode."""
 

@@ -16,8 +16,8 @@ import numpy as np
 
 from fluxthemis.environments.base import BaseEnvironment
 from fluxthemis.model_clients.base import BasePolicyClient
-from fluxthemis.structures import (ActionChunk, EpisodeResult, StepResult,
-                                   TaskSpec)
+from fluxthemis.structures import (ActionChunk, EpisodeResult, PolicyStop,
+                                   StepResult, TaskSpec)
 
 from .video import EpisodeVideoRecorder
 
@@ -211,6 +211,25 @@ def execute_episode(environment: BaseEnvironment,
                 observation=observation,
             )
             action_chunk = policy_client.predict_action(observation, context)
+            if isinstance(action_chunk, PolicyStop):
+                # Expected policy termination: do NOT step, guess actions,
+                # overwrite benchmark truth, or kill/retry the worker.
+                model_calls += 1
+                prediction_metadata.append(dict(action_chunk.metadata))
+                latest_info['policy_stop'] = dict(
+                    status=action_chunk.status, reason=action_chunk.reason)
+                termination_reason = f'policy_{action_chunk.status}'
+                if action_chunk.status == 'completed':
+                    # Self-declared completion stops execution without a
+                    # simulator veto. Keep benchmark truth separate.
+                    latest_info['agent_success'] = True
+                    latest_info['completion_source'] = 'agent_visual'
+                print(
+                    f'[FluxThemis] episode {job.episode_id} stopped: '
+                    f'{termination_reason} ({action_chunk.reason}), '
+                    f'steps={steps}; recording outcome and continuing',
+                    flush=True)
+                break
             actions = validate_action_chunk(action_chunk)
             if not isinstance(action_chunk.metadata, Mapping):
                 raise TypeError('ActionChunk.metadata must be a mapping')
@@ -260,6 +279,11 @@ def execute_episode(environment: BaseEnvironment,
                     episode_done = True
                 if episode_done:
                     break
+        final_info = environment.finalize_episode(
+            success=success, termination_reason=termination_reason)
+        if not isinstance(final_info, Mapping):
+            raise TypeError('Environment finalization info must be a mapping')
+        latest_info.update(final_info)
         if recorder is not None:
             recorded_paths = recorder.finish(success)
             if recorded_paths:

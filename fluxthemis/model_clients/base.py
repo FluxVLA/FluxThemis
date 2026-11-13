@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Mapping
 
-from fluxthemis.structures import ActionChunk, TaskSpec
+from fluxthemis.structures import ActionChunk, PolicyStop, TaskSpec
 
 
 class BasePolicyClient(ABC):
@@ -30,8 +30,12 @@ class BasePolicyClient(ABC):
 
     @abstractmethod
     def predict_action(self, observation: Any,
-                       context: Mapping[str, Any]) -> ActionChunk:
-        """Return float32 actions with shape ``[T, A]``."""
+                       context: Mapping[str, Any]) -> ActionChunk | PolicyStop:
+        """Return native float32 ``[T, A]`` actions or stop this episode.
+
+        PolicyStop is an expected outcome, not a crashed worker; task success
+        remains determined by environment transitions, never by the policy.
+        """
 
     def close(self) -> None:
         """Release resources. Implementations should make this idempotent."""

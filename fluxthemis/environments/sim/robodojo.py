@@ -379,7 +379,8 @@ class RoboDojoEnvironment(BaseEnvironment):
                  num_envs: int = 1,
                  seed: int = 0,
                  save_videos: bool = False,
-                 video_dir: str | os.PathLike | None = None) -> None:
+                 video_dir: str | os.PathLike | None = None,
+                 completion_diagnostics: bool = False) -> None:
         if not isinstance(env_cfg_type, str) or not env_cfg_type:
             raise ValueError('env_cfg_type must be a non-empty string')
         if action_mode not in ROBODOJO_ACTION_MODES:
@@ -392,6 +393,9 @@ class RoboDojoEnvironment(BaseEnvironment):
             raise TypeError('headless must be a boolean')
         if not isinstance(save_videos, bool):
             raise TypeError('save_videos must be a boolean')
+        if not isinstance(completion_diagnostics, bool):
+            raise TypeError('completion_diagnostics must be a boolean')
+        self.completion_diagnostics = completion_diagnostics
         num_envs = self._nonnegative_integer(num_envs, 'num_envs')
         if num_envs != 1:
             raise ValueError(
@@ -425,6 +429,9 @@ class RoboDojoEnvironment(BaseEnvironment):
             self._video_dir = video_path
         inventory = robodojo_task_inventory(self.robodojo_root)
         task_names = _resolve_task_names(task_name, inventory)
+        if completion_diagnostics and set(task_names) != {'stack_blocks'}:
+            raise ValueError('Completion diagnostics currently support only '
+                             'stack_blocks')
         self._tasks = tuple(
             TaskSpec(
                 task_id=task_id,
@@ -660,6 +667,9 @@ class RoboDojoEnvironment(BaseEnvironment):
         if callable(register_score):
             register_score()
         observation = robodojo_obs_to_flat(self._env.get_obs())
+        # EvalEnv.reset() initializes success=True: while end_flag=False,
+        # this means not failed, NOT that the task has been completed.
+        observation['predicates'] = self._completion_predicates()
         info = {
             'task_id': task.task_id,
             'episode_index': int(episode_index),
@@ -667,6 +677,8 @@ class RoboDojoEnvironment(BaseEnvironment):
             'environment_case_index': layout_index,
             'layout_index': layout_index,
         }
+        if self.completion_diagnostics:
+            info['completion_predicates'] = dict(observation['predicates'])
         if self.save_videos and self._video_dir is not None:
             info['video_dir'] = str(self._video_dir)
         return observation, info
@@ -685,6 +697,9 @@ class RoboDojoEnvironment(BaseEnvironment):
                 'unstable') from exc
         terminated = bool(self._env.end_flag[0])
         success = bool(self._env.success[0]) if terminated else None
+        # Match StepResult's native terminal success, never the optimistic
+        # running flag or a progress-score threshold.
+        observation['predicates'] = self._completion_predicates()
         score = self._current_score(success)
         video_paths: list[str] = []
         if terminated:
@@ -699,6 +714,8 @@ class RoboDojoEnvironment(BaseEnvironment):
             'environment_case_index': self._episode_layout_index,
             'layout_index': self._episode_layout_index,
         }
+        if self.completion_diagnostics:
+            info['completion_predicates'] = dict(observation['predicates'])
         if video_paths:
             info['video_paths'] = video_paths
         return StepResult(
@@ -710,6 +727,50 @@ class RoboDojoEnvironment(BaseEnvironment):
             score=score,
             info=info,
         )
+
+    def _completion_predicates(self) -> dict[str, bool | None]:
+        """Read native criteria without advancing physics or reward state.
+
+        Criteria are diagnostics, NOT a substitute for native termination.
+        Missing native diagnostic support is unknown, never guessed success.
+        """
+        facts = dict(
+            environment_success=(
+                bool(self._env.end_flag[0]) and bool(self._env.success[0])))
+        if not self.completion_diagnostics:
+            return facts
+        facts.update(blocks_stacked=None, arms_at_origin=None)
+        rm = getattr(self._env, 'reward_manager', None)
+        evaluate = getattr(rm, 'call_func_parser', None)
+        stacked = getattr(rm, 'is_stacked', None)
+        home = getattr(rm, 'all_robot_back_to_origin', None)
+        thresholds = getattr(self._env, '_stacked_xy_thresholds', None)
+        checks = {}
+        if callable(stacked) and callable(thresholds):
+            checks['blocks_stacked'] = stacked(
+                label_list=['block_0', 'block_1', 'block_2'],
+                xy_threshold=thresholds())
+        if callable(home):
+            checks['arms_at_origin'] = home()
+        if callable(evaluate):
+            for key, check in checks.items():
+                value = float(evaluate(check, 0))
+                if not np.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError('Invalid native completion diagnostic')
+                facts[key] = value > 1 - 1e-3
+        return facts
+
+    def finalize_episode(self, *, success: bool,
+                         termination_reason: str) -> dict:
+        if not self._episode_active or self._video_finalized:
+            return {}
+        tag = ('agent_done' if termination_reason == 'policy_completed' else
+               'success' if success else 'fail'
+               if termination_reason.startswith('policy_') else 'truncated')
+        paths = self._finalize_video(self._episode_task, self._episode_index,
+                                     tag)
+        self._video_finalized = True
+        return {'video_paths': paths} if paths else {}
 
     def _current_score(self, success: bool | None) -> float:
         if success:

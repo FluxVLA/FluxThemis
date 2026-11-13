@@ -45,6 +45,7 @@ class FluxVLAZMQTransport:
         self._context = None
         self._socket = None
         self._server_deployment_id: str | None = None
+        self.server_mode: str | None = None
 
     @property
     def server_deployment_id(self) -> str:
@@ -105,6 +106,7 @@ class FluxVLAZMQTransport:
         self._socket = None
         self._context = None
         self._server_deployment_id = None
+        self.server_mode = None
         if socket is not None:
             socket.close(linger=0)
         if context is not None:
@@ -143,6 +145,7 @@ class FluxVLAZMQTransport:
                     raise RuntimeError('FluxVLA server deployment changed '
                                        'while the client was connected')
                 self._server_deployment_id = server_deployment_id
+                self.server_mode = status['server_mode']
                 if status.get('status') == 'ready':
                     return
             except TimeoutError:
@@ -163,8 +166,11 @@ def validate_status(status, workers=None, require_evaluation_reporting=True):
     if not isinstance(status, Mapping):
         raise ValueError('FluxVLA status response must be a mapping')
     nonempty_string(status.get('deployment_id'), 'deployment_id')
-    if status.get('server_mode') != 'stateless':
-        raise ValueError('FluxVLA server must be stateless')
+    if status.get('server_mode') not in {'stateless', 'stateful'}:
+        raise ValueError('Unsupported FluxVLA server mode')
+    if status.get('server_mode') == 'stateful' and status.get(
+            'workers_expected') != 1:
+        raise ValueError('Stateful FluxVLA requires one model worker')
     if require_evaluation_reporting and status.get(
             'evaluation_reporting') is not True:
         raise ValueError('FluxVLA evaluation reporting is disabled')

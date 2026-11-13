@@ -45,5 +45,14 @@ class BaseEnvironment(ABC):
     def render(self) -> Any | None:
         return None
 
+    def finalize_episode(self, *, success: bool,
+                         termination_reason: str) -> dict:
+        """Flush episode artifacts without stepping or changing its outcome.
+
+        Native recorders override this for externally stopped episodes too.
+        Return artifact info (e.g. video_paths); no simulation action is sent.
+        """
+        return {}
+
     def close(self) -> None:
         """Release resources. Implementations should make this idempotent."""
