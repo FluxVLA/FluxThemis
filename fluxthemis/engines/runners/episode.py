@@ -209,6 +209,7 @@ def execute_episode(environment: BaseEnvironment,
                 info=latest_info,
                 episode_id=job.episode_id,
                 observation=observation,
+                executed_steps=steps,
             )
             action_chunk = policy_client.predict_action(observation, context)
             if isinstance(action_chunk, PolicyStop):
@@ -321,7 +322,17 @@ def build_context(task: TaskSpec,
                   policy_seed: int,
                   info: Mapping[str, Any],
                   episode_id: str | None = None,
-                  observation: Any = None) -> dict[str, Any]:
+                  observation: Any = None,
+                  executed_steps: int | None = None) -> dict[str, Any]:
+    """Build policy context using actions executed by this episode runner.
+
+    Simulator counters can include warm-up or expert motions, or be absent.
+    The runner's count starts at zero after reset and advances only after
+    an environment step returns successfully. Keep native info unchanged.
+    """
+    if executed_steps is not None and (type(executed_steps) is not int
+                                       or executed_steps < 0):
+        raise ValueError('executed_steps must be a nonnegative integer')
     prompt = info.get('task_description', task.description)
     if not isinstance(prompt, str):
         raise TypeError('environment task_description must be a string')
@@ -339,6 +350,8 @@ def build_context(task: TaskSpec,
     }
     if episode_id is not None:
         context['episode_id'] = episode_id
+    if executed_steps is not None:
+        context['observation_id'] = executed_steps
     for key, value in task.metadata.items():
         context.setdefault(str(key), value)
     return context

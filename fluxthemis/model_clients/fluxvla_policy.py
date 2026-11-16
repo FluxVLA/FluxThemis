@@ -50,6 +50,10 @@ class FluxVLAPolicyClient(BasePolicyClient):
     enables an episode anchor and ``num_frames`` images spaced ``stride``
     simulator steps apart. With history enabled, ``replan_steps`` must match
     the number of actions executed between predictions.
+
+    With ``send_policy_context=True``, the common episode runner supplies
+    ``context.observation_id`` as the number of executed policy actions.
+    No simulator-specific step field or success feedback is required.
     """
 
     def __init__(self,
@@ -275,11 +279,18 @@ class FluxVLAPolicyClient(BasePolicyClient):
         if self.send_policy_context:
             if context.get('episode_id') != self._episode_id:
                 raise ValueError('Policy context episode_id mismatch')
-            info = context.get('info', {})
-            step = info.get('step',
-                            0 if self._prediction_sequence == 1 else None)
+            if 'observation_id' in context:
+                step = context['observation_id']
+            else:
+                # Compatibility for direct callers predating runner-owned
+                # progress. Never replace an explicitly invalid runner ID.
+                info = context.get('info', {})
+                step = info.get('step',
+                                0 if self._prediction_sequence == 1 else None)
             if type(step) is not int or step < 0:
-                raise ValueError('Policy context requires actual info.step')
+                raise ValueError('Policy context requires a nonnegative '
+                                 'observation_id from the episode runner '
+                                 '(legacy callers may supply info.step)')
             payload['policy_context'] = dict(
                 episode_id=self._episode_id,
                 sequence=self._prediction_sequence,
