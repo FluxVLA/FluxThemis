@@ -29,6 +29,10 @@ def file_hash(path):
 def asset_identity(root):
     """Hash asset content; ignore task-private generated robot paths."""
     root = Path(root)
+    if root.is_file():
+        return recovery.digest(
+            [root.name, root.stat().st_size,
+             file_hash(root)])
     entries = []
     for path in sorted(root.rglob('*')):
         if not path.is_file():

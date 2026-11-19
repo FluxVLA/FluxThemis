@@ -62,7 +62,8 @@ def manifest(start):
     # remain identical before old and new results can be combined.
     keys = ('base_seed', 'episodes_per_task', 'episodes_per_task_by_task',
             'max_episode_steps', 'execute_horizon', 'stop_on_success',
-            'task_ids', 'tasks', 'total_episodes', 'strict_worker_assignment')
+            'task_ids', 'tasks', 'total_episodes', 'strict_worker_assignment',
+            'task_metadata_filters')
     return {key: start.get(key) for key in keys}
 
 

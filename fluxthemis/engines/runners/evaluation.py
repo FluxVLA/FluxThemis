@@ -35,6 +35,7 @@ class EvaluationSettings:
     max_episode_steps: int = 1000
     execute_horizon: int | None = None
     task_ids: Sequence[str] | str | None = None
+    task_metadata_filters: Mapping[str, Any] | None = None
     stop_on_success: bool = True
     # Fixed assignment is opt-in; existing configs retain dynamic scheduling.
     strict_worker_assignment: bool = False
@@ -61,6 +62,9 @@ class EvaluationSettings:
                 _positive_integer(self.execute_horizon, 'execute_horizon'))
         object.__setattr__(self, 'task_ids',
                            _normalize_task_ids(self.task_ids))
+        object.__setattr__(
+            self, 'task_metadata_filters',
+            _normalize_task_metadata_filters(self.task_metadata_filters))
         if not isinstance(self.stop_on_success, bool):
             raise TypeError('stop_on_success must be a boolean')
         if not isinstance(self.strict_worker_assignment, bool):
@@ -76,6 +80,10 @@ class EvaluationSettings:
             if value is not None:
                 object.__setattr__(self, name,
                                    str(Path(value).expanduser().resolve()))
+
+    @property
+    def full_suite(self) -> bool:
+        return self.task_ids is None and self.task_metadata_filters is None
 
 
 def utc_now() -> str:
@@ -126,6 +134,32 @@ def _normalize_task_ids(
 def _default_run_name() -> str:
     timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     return f'eval_{timestamp}_{os.getpid()}'
+
+
+def _normalize_task_metadata_filters(
+        filters: Mapping[str, Any] | None
+) -> dict[str, tuple[Any, ...]] | None:
+    if filters is None:
+        return None
+    if not isinstance(filters, Mapping):
+        raise TypeError('task_metadata_filters must be a mapping')
+    if not filters:
+        raise ValueError('task_metadata_filters cannot be empty')
+    normalized = {}
+    for field_name, expected in filters.items():
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError(
+                'task_metadata_filters fields must be non-empty strings')
+        if isinstance(expected,
+                      Sequence) and not isinstance(expected, (str, bytes)):
+            values = tuple(expected)
+        else:
+            values = (expected, )
+        if not values:
+            raise ValueError(
+                f'task_metadata_filters[{field_name!r}] cannot be empty')
+        normalized[field_name] = values
+    return normalized
 
 
 def _validate_run_name(run_name: str) -> None:
@@ -342,7 +376,10 @@ def _validate_resume_settings(settings: EvaluationSettings,
         for task in start['task_ids']
     }
     changed = changed or counts != start['episodes_per_task_by_task']
-    if settings.task_ids is not None:
+    changed = changed or to_jsonable(
+        settings.task_metadata_filters) != start.get('task_metadata_filters')
+    if (settings.task_ids is not None
+            and settings.task_metadata_filters is None):
         changed = changed or list(settings.task_ids) != start['task_ids']
     if changed:
         raise ValueError(
@@ -379,6 +416,10 @@ def _build_summary(settings: EvaluationSettings, state: _EvaluationState,
             settings.execute_horizon,
             'completed_episodes':
             state.completed_episodes,
+            'full_suite':
+            settings.full_suite,
+            'task_metadata_filters':
+            to_jsonable(settings.task_metadata_filters),
         },
         'metrics': to_jsonable(dict(metrics)),
         'artifacts': artifacts,
@@ -411,6 +452,10 @@ def _build_run_start_event(settings: EvaluationSettings,
         len(state.selected_tasks),
         'total_episodes':
         state.total_episodes,
+        'full_suite':
+        settings.full_suite,
+        'task_metadata_filters':
+        to_jsonable(settings.task_metadata_filters),
         'tasks': [
             _task_report(task, task_index)
             for task_index, task in enumerate(state.selected_tasks)
@@ -454,6 +499,8 @@ def _build_run_end_event(
         state.completed_episodes,
         'total_episodes':
         state.total_episodes,
+        'full_suite':
+        settings.full_suite,
         'current_episode': (to_jsonable(dict(current_episode))
                             if current_episode is not None else None),
         'last_result':

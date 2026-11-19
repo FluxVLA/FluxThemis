@@ -190,7 +190,8 @@ def load_config(path, *, mode=None, overrides=None):
     if mode == 'smoke':
         smoke_tasks = {
             'RoboDojoEnvironment': 'put_bottles_into_dustbin',
-            'LiberoEnvironment': '0'
+            'LiberoEnvironment': '0',
+            'LiberoPlusEnvironment': '0',
         }
         if robotwin_tasks:
             smoke_tasks[kind] = robotwin_tasks[0]

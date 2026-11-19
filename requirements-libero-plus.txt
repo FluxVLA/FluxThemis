@@ -1,0 +1,7 @@
+# Incremental dependencies for scripts/install_libero_plus.sh.
+# Install the base LIBERO runtime with scripts/install_libero.sh first.
+# Download official assets when --asset-mode auto|download requires it.
+huggingface-hub>=0.27,<2
+# Imported by the Plus environment wrapper for image corruptions.
+scikit-image==0.25.2
+Wand==0.7.2
