@@ -130,7 +130,12 @@ def validate_journal(rows):
                 raise ValueError('Episode ID does not match canonical ordinal')
             if kind == 'episode_start':
                 if key in starts:
-                    raise ValueError('Duplicate episode_start')
+                    previous = starts[key]['environment_case_index']
+                    replacement = body.get('replaces_environment_case_index')
+                    if (type(replacement) is not int or replacement != previous
+                            or type(body['environment_case_index']) is not int
+                            or body['environment_case_index'] == previous):
+                        raise ValueError('Duplicate episode_start')
                 starts[key] = body
             else:
                 if key not in starts:

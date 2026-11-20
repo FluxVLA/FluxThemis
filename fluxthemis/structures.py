@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
+def positive_integer(value: int, name: str) -> int:
+    """Validate an integer count without accepting booleans or coercing it."""
+    if type(value) is not int or value < 1:
+        raise ValueError(f'{name} must be a positive integer')
+    return value
+
+
 @dataclass
 class TaskSpec:
     """A task exposed by an evaluation environment."""
@@ -34,6 +41,32 @@ class TaskSpec:
                 data['task_id'] = data.pop('id')
             return cls(**data)
         raise TypeError(f'Cannot create TaskSpec from {type(value).__name__}')
+
+
+@dataclass
+class EnvironmentReset:
+    """Initial observation and context for one slot's requested episode."""
+
+    observation: Any = None
+    info: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CaseRejection:
+    """An invalid case to replace without producing an episode result."""
+
+    info: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EpisodeInterruption:
+    """An unfinished attempt to retry with the same episode and initial case.
+
+    This is separate from a reset or step result: it carries no observation,
+    reward or outcome, and must not advance episode progress.
+    """
+
+    info: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass

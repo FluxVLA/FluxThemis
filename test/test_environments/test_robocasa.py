@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from fluxthemis.environments import EnvironmentResetRequest
 from fluxthemis.environments.sim import robocasa as robocasa_module
 from fluxthemis.environments.sim.robocasa import (ROBOCASA_ACTION_DIM,
                                                   ROBOCASA_ACTION_ORDERS,
@@ -62,14 +63,11 @@ def test_robocasa_episode_contract(monkeypatch, action_order):
 
     environment.setup()
     task = environment.tasks()[0]
-    _, info = environment.reset(
-        task,
-        episode_index=0,
-        environment_seed=19,
-        environment_case_index=0,
-    )
+    reset = environment.reset_batch([EnvironmentResetRequest(task, 0, 19,
+                                                             0)])[0]
+    info = reset.info
     action = np.arange(ROBOCASA_ACTION_DIM, dtype=np.float32)
-    transition = environment.step(action)
+    transition = environment.step_batch([action])[0]
     native = native_environments[0]
 
     assert native.kwargs == {'seed': 19}

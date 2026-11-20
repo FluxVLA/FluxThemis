@@ -16,7 +16,7 @@ from mmengine.utils import digit_version
 from fluxthemis.engines.utils import ENVIRONMENTS
 from fluxthemis.structures import StepResult, TaskSpec
 
-from ..base import BaseEnvironment
+from ..base import SingleEnvironmentAdapter
 
 ROBOSUITE_MINIMUM_VERSION = '1.5.0'
 ROBOSUITE_MAXIMUM_VERSION = '1.5.2'
@@ -46,7 +46,7 @@ class _LiberoRuntime:
 
 
 @ENVIRONMENTS.register_module()
-class LiberoEnvironment(BaseEnvironment):
+class LiberoEnvironment(SingleEnvironmentAdapter):
     """LIBERO simulation adapter matching FluxVLA evaluation semantics.
 
     The adapter returns untouched LIBERO observations. Image rotation, model
@@ -266,7 +266,7 @@ class LiberoEnvironment(BaseEnvironment):
             info=result_info,
         )
 
-    def render(self) -> Any | None:
+    def _render(self) -> Any | None:
         if self._last_observation is None:
             return None
         image = self._last_observation.get('agentview_image')

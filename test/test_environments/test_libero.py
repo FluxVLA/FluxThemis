@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from fluxthemis.environments import EnvironmentResetRequest
 from fluxthemis.environments.sim import libero as libero_module
 from fluxthemis.environments.sim.libero import (LIBERO_DUMMY_ACTION,
                                                 LiberoEnvironment)
@@ -68,13 +69,10 @@ def test_libero_episode_contract(monkeypatch):
         task_suite_name='libero_10', simulator_seed=5, num_steps_wait=1)
     environment.setup()
     exposed_task = environment.tasks()[0]
-    observation, info = environment.reset(
-        exposed_task,
-        episode_index=0,
-        environment_seed=11,
-        environment_case_index=3,
-    )
-    transition = environment.step(np.arange(7, dtype=np.float32))
+    reset = environment.reset_batch(
+        [EnvironmentResetRequest(exposed_task, 0, 11, 3)])[0]
+    observation, info = reset.observation, reset.info
+    transition = environment.step_batch([np.arange(7, dtype=np.float32)])[0]
 
     assert exposed_task.description == 'pick up the black bowl'
     assert native.seed_value == 5

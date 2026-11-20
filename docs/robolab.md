@@ -43,6 +43,14 @@ interpreter/root, model endpoint, GPU, worker count and output directory.
 The default [droid.py](../configs/robolab/droid.py) runs every task for ten
 serial episodes with one simulator worker and one dedicated model service.
 FluxThemis connects to that service through the shared launcher.
+Set `themis.evaluation.environment.num_envs` in the Python configuration to
+run multiple scenes of one task per worker (default: 1). Use
+`--cfg-options themis.evaluation.environment.num_envs=3` to override it from
+`run_evaluation.sh`. Increase `--episode-timeout-s` with `num_envs`: the
+timeout covers the whole assignment, and FluxThemis requests model actions
+separately for each slot. See RoboLab's
+[VRAM guide](https://github.com/NVlabs/RoboLab/blob/main/docs/env_vram_size_guide.md)
+when selecting a scene count.
 
 For N GPUs, the companion FluxVLA guide provides a fixed_worker service and
 the corresponding frozen YAML. Set the same GPU list on both sides,
@@ -58,7 +66,7 @@ bash scripts/run_evaluation.sh --config configs/robolab/remote.yaml --smoke
 bash scripts/run_evaluation.sh --config configs/robolab/remote.yaml --full
 ```
 
-Smoke selects BananaInBowlTask and one episode; full selects all tasks.
+Smoke selects BananaInBowlTask and one episode per scene; full selects all tasks.
 Without either mode flag, the default YAML selects all tasks and ten episodes.
 episodes: null preserves the Python-configured episode quota.
 The base config accepts the entire returned action chunk. The optional
@@ -102,14 +110,19 @@ The preset does not change action format, execution horizon or success rules.
 
 ## 3. Evaluation protocol and limitations
 
-Only num_envs=1 is supported. One Isaac application belongs to each worker.
+Each worker runs `num_envs` RoboLab scenes in one Isaac application; an
+assignment contains episodes of one task. The assigned slot affects an
+episode's initial state, as in native RoboLab multi-environment evaluation.
 Within each worker, a task reuses its native environment for the episodes
 assigned to that worker, then closes it. Fixed assignment uses global task-major
 episode numbers: (episode_number - 1) % N, starting at one. Quotas are global
 per task, not multiplied by N; each task may have one instance per worker.
-Native instance_episode counts local reuse; it can differ from episode_index.
-Every episode resets native evaluation state and calls two native resets.
+Native instance_episode counts local assignments; it can differ from episode_index.
+Every assignment resets native evaluation state and calls two native resets.
 The creation seed is retained; episode seed metadata does not reseed layouts.
+Finished and unused slots are frozen while the remaining slots continue.
+Native termination within the first two steps resets that scene as a physics
+artifact; it does not produce an episode result or extend the native step budget.
 
 By default, observations contain RGB images under over_shoulder_left_camera and wrist_cam,
 and states: seven joint positions followed by the gripper position.
@@ -124,8 +137,7 @@ Video is disabled by default. Technical retries are zero, including idle
 failures; resume is unsupported. Technical errors make the run incomplete.
 An ordinary unsuccessful task remains completed and counts in the results.
 Do not rerun normal failures or repair invalid actions.
-Single-environment request ordering requires new score measurements.
-Changing GPU count or task order also changes the sampling recipe and may
+Changing scene count, GPU count or task order changes the sampling recipe and may
 change actions and scores. Keep these settings fixed when comparing models.
 The shared launcher skips unreadable or vanished /proc/<pid>/stat entries.
 It cleans up owned processes and reports termination or reaping failures.

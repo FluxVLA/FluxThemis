@@ -51,10 +51,10 @@ class EpisodeVideoRecorder:
             stem += f'_worker_{_safe_name(self.worker_id)}'
         self._base_stem = stem
 
-    def capture(self, environment: Any) -> None:
+    def capture(self, environment: Any, slot: int) -> None:
         if self._base_stem is None:
             raise RuntimeError('video recorder must be started before capture')
-        frame = environment.render()
+        frame = environment.render(slot)
         if frame is None:
             return
         rgb = _normalize_rgb_frame(frame)

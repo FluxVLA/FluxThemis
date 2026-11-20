@@ -7,11 +7,11 @@ import numpy as np
 from fluxthemis.engines.utils import ENVIRONMENTS
 from fluxthemis.structures import StepResult, TaskSpec
 
-from ..base import BaseEnvironment
+from ..base import SingleEnvironmentAdapter
 
 
 @ENVIRONMENTS.register_module()
-class GymnasiumEnvironment(BaseEnvironment):
+class GymnasiumEnvironment(SingleEnvironmentAdapter):
     """Adapter for Gymnasium environments with explicit success mapping."""
 
     def __init__(self,
@@ -99,7 +99,7 @@ class GymnasiumEnvironment(BaseEnvironment):
             info=dict(info),
         )
 
-    def render(self) -> Any | None:
+    def _render(self) -> Any | None:
         self._require_setup()
         return self.env.render()
 

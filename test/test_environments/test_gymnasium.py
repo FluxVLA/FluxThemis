@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from fluxthemis.environments import EnvironmentResetRequest
 from fluxthemis.environments.sim import GymnasiumEnvironment
 
 
@@ -50,13 +51,11 @@ def test_gymnasium_adapter_maps_task_options_and_success(monkeypatch):
 
     environment.setup()
     task = environment.tasks()[0]
-    observation, info = environment.reset(
-        task,
-        episode_index=0,
-        environment_seed=11,
-        environment_case_index=0,
-    )
-    transition = environment.step(np.asarray([1.0], dtype=np.float32))
+    reset = environment.reset_batch([EnvironmentResetRequest(task, 0, 11,
+                                                             0)])[0]
+    observation, info = reset.observation, reset.info
+    transition = environment.step_batch([np.asarray([1.0],
+                                                    dtype=np.float32)])[0]
 
     assert observation.tolist() == [0.0]
     assert info == {
@@ -69,6 +68,6 @@ def test_gymnasium_adapter_maps_task_options_and_success(monkeypatch):
     assert isinstance(fake_env.last_action, int)
     assert transition.terminated
     assert transition.success is True
-    assert environment.render() == 'frame'
+    assert environment.render(0) == 'frame'
     environment.close()
     assert fake_env.closed

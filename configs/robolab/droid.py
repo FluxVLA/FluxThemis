@@ -1,13 +1,13 @@
-"""RoboLab DROID scalar evaluation through the shared remote launcher."""
+"""RoboLab DROID evaluation through the shared remote launcher."""
 
 themis = dict(
     evaluation=dict(
         base_seed=0,
         environment=dict(
             headless=True,
-            num_envs=1,
             output_dir='work_dirs/robolab',
             robolab_root=None,
+            num_envs=1,
             simulator_seed=0,
             task_name='all',
             type='RoboLabEnvironment'),

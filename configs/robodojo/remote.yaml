@@ -7,7 +7,7 @@ simulator:
   gpu_ids: [0]
   workers_per_gpu: 1
   task: put_bottles_into_dustbin  # Used when neither --smoke nor --full is given.
-  episodes: 1  # --smoke uses one episode per configured simulator worker.
+  episodes: 1  # --smoke uses one episode per scene.
   cache: ~/.cache/fluxthemis-robodojo
   save_videos: true
   coordinator_port: 15558  # Next port is reserved for simulator torchrun.

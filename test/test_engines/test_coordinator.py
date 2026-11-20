@@ -1,3 +1,6 @@
+import pytest
+
+from fluxthemis.engines.runners.assignment import EpisodeAssignment
 from fluxthemis.engines.runners.coordinator import (
     DistributedEvaluationCoordinator, _SchedulingState, _WorkerSlot)
 from fluxthemis.engines.runners.episode import build_episode_jobs
@@ -40,7 +43,7 @@ def _coordinator_with_active_job(job):
         generation=0,
         device='0',
         task_manifest=(job.task, ),
-        current_job=job,
+        assignment=EpisodeAssignment((job, )),
         simulator_ready=True,
     )
     coordinator._worker_slots[slot.worker_id] = slot
@@ -52,6 +55,8 @@ def _coordinator_with_active_job(job):
             worker_id=slot.worker_id,
             generation=slot.generation,
             episode_id=job.episode_id,
+            assignment_id=slot.assignment.assignment_id,
+            phase='reset',
         ),
         empty_payload(),
     ])
@@ -69,7 +74,6 @@ def test_rejected_job_requeues_same_slot_with_next_environment_case():
     coordinator, slot, evaluation_run = _coordinator_with_active_job(job)
     scheduling_state = _SchedulingState.from_jobs(jobs)
     scheduling_state.pending_jobs.clear()
-    scheduling_state.started_episode_ids.add(job.episode_id)
     coordinator._scheduling_state = scheduling_state
 
     coordinator._receive_worker_message(evaluation_run)
@@ -84,6 +88,14 @@ def test_rejected_job_requeues_same_slot_with_next_environment_case():
     assert scheduling_state.results_by_episode_id == {}
     assert scheduling_state.started_episode_ids == set()
     assert scheduling_state.next_environment_case_index_by_task == {'task': 3}
+    assert not slot.is_idle
+    coordinator._worker_router.incoming[1] = encode_header(
+        "assignment_end",
+        deployment_id="deployment",
+        worker_id=slot.worker_id,
+        generation=slot.generation,
+        assignment_id=slot.assignment.assignment_id)
+    coordinator._receive_worker_message(evaluation_run)
     assert slot.is_idle
     assert coordinator._worker_router.sent == []
 
@@ -119,8 +131,59 @@ def test_reconnecting_worker_requeues_active_episode():
     assert scheduling_state.pending_jobs.popleft() == job
     assert scheduling_state.restart_counts_by_episode_id == {job.episode_id: 1}
     assert not slot.is_ready
-    assert slot.current_job is None
+    assert slot.assignment is None
     assert slot.routing_id == replacement_routing_id
     assert slot.generation == 1
     assert slot.recovery_deadline is not None
     assert coordinator._worker_router.sent == []
+
+
+@pytest.mark.parametrize('phase', ['reset', 'step'])
+@pytest.mark.parametrize('capacity', [1, 3])
+def test_rejection_replaces_layout_before_pending_jobs(phase, capacity,
+                                                       capsys):
+    jobs = build_episode_jobs([TaskSpec('task')], capacity + 1, 7, 'run')
+    coordinator, slot, run = _coordinator_with_active_job(jobs[0])
+    coordinator.simulator_restart_limit = 0
+    slot.assignment = EpisodeAssignment(jobs[:capacity])
+    state = coordinator._scheduling_state = _SchedulingState.from_jobs(jobs)
+    state.pending_jobs.clear()
+    state.pending_jobs.append(jobs[-1])
+    state.started_episode_ids.add(jobs[0].episode_id)
+    coordinator._worker_router.incoming[1] = encode_header(
+        'environment_case_rejected',
+        deployment_id='deployment',
+        worker_id=slot.worker_id,
+        generation=0,
+        episode_id=jobs[0].episode_id,
+        assignment_id=slot.assignment.assignment_id,
+        phase=phase)
+    coordinator._receive_worker_message(run)
+    retry = state.pending_jobs[0]
+    assert retry.episode_id == jobs[0].episode_id
+    assert retry.policy_seed == jobs[0].policy_seed
+    assert retry.environment_seed == jobs[0].environment_seed
+    assert retry.environment_case_index == capacity + 1
+    assert list(state.pending_jobs) == [retry, jobs[-1]]
+    assert slot.completed_episode_ids == {jobs[0].episode_id}
+    assert not slot.is_idle
+    assert state.restart_counts_by_episode_id == {}
+    assert state.results_by_episode_id == {}
+    assert f'during {phase}' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('phase', [None, 'unknown', True])
+def test_invalid_rejection_phase_is_rejected(phase):
+    jobs = build_episode_jobs([TaskSpec('task')], 1, 7, 'run')
+    coordinator, slot, run = _coordinator_with_active_job(jobs[0])
+    coordinator._scheduling_state = _SchedulingState.from_jobs(jobs)
+    coordinator._worker_router.incoming[1] = encode_header(
+        'environment_case_rejected',
+        deployment_id='deployment',
+        worker_id=slot.worker_id,
+        generation=0,
+        episode_id=jobs[0].episode_id,
+        assignment_id=slot.assignment.assignment_id,
+        phase=phase)
+    with pytest.raises(ValueError, match='phase'):
+        coordinator._receive_worker_message(run)
