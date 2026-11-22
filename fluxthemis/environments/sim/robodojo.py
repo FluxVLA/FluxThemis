@@ -13,14 +13,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
 from fluxthemis.engines.utils import ENVIRONMENTS
-from fluxthemis.structures import StepResult, TaskSpec
+from fluxthemis.structures import (CaseRejection, EnvironmentReset,
+                                   EpisodeInterruption, StepResult, TaskSpec,
+                                   positive_integer)
 
-from ..base import BaseEnvironment, EnvironmentCaseRejected
+from ..base import BaseEnvironment, EnvironmentResetRequest
 from .robodojo_log_capture import FileLogCapture
 
 ROBODOJO_BENCHMARK = 'RoboDojo'
@@ -255,6 +257,7 @@ class _PrelaunchRuntime:
     load_yaml: Any
     process_config: Any
     process_randomization: Any
+    resolve_random_task_num_envs: Any
 
 
 @dataclass(frozen=True)
@@ -311,7 +314,9 @@ def _load_prelaunch_runtime() -> _PrelaunchRuntime:
         from omegaconf import OmegaConf
         from src.eval_client.physx_warning_monitor import get_monitor
         from utils.load_file import load_yaml
-        from utils.pipeline_utils import process_config, process_randomization
+        from utils.pipeline_utils import (process_config,
+                                          process_randomization,
+                                          resolve_random_task_num_envs)
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             'RoboDojoEnvironment requires the RoboDojo simulation stack. '
@@ -330,6 +335,7 @@ def _load_prelaunch_runtime() -> _PrelaunchRuntime:
         load_yaml=load_yaml,
         process_config=process_config,
         process_randomization=process_randomization,
+        resolve_random_task_num_envs=resolve_random_task_num_envs,
     )
 
 
@@ -368,6 +374,7 @@ class RoboDojoEnvironment(BaseEnvironment):
     """
 
     supports_native_video_recording = True
+    requires_single_task = True
 
     def __init__(self,
                  task_name: str | Sequence[str],
@@ -396,11 +403,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         if not isinstance(completion_diagnostics, bool):
             raise TypeError('completion_diagnostics must be a boolean')
         self.completion_diagnostics = completion_diagnostics
-        num_envs = self._nonnegative_integer(num_envs, 'num_envs')
-        if num_envs != 1:
-            raise ValueError(
-                'RoboDojoEnvironment currently drives a single environment; '
-                'num_envs must be 1')
+        num_envs = positive_integer(num_envs, 'num_envs')
         seed = self._nonnegative_integer(seed, 'seed')
 
         root_value = robodojo_root or os.environ.get(
@@ -411,7 +414,8 @@ class RoboDojoEnvironment(BaseEnvironment):
         self.action_mode = action_mode
         self.device_id = device_id
         self.headless = headless
-        self.num_envs = int(num_envs)
+        self._num_envs = num_envs
+        self._native_num_envs = num_envs
         self.seed = int(seed)
         self.worker_id: str | None = None
         self.run_id: str | None = None
@@ -452,14 +456,20 @@ class RoboDojoEnvironment(BaseEnvironment):
         self._env = None
         self._simulation_app = None
         self._runtime: _PrelaunchRuntime | None = None
+        self._sim_cfg: Mapping[str, Any] | None = None
+        self._task_capacities: dict[str, int] = {}
         self._post: _PostlaunchRuntime | None = None
         self._physx_monitor = None
         self._original_cwd: str | None = None
         self._episode_active = False
-        self._episode_task: TaskSpec | None = None
-        self._episode_index: int | None = None
-        self._episode_layout_index: int | None = None
-        self._video_finalized = True
+        self._batch_requests: list[EnvironmentResetRequest | None] = ([None] *
+                                                                      num_envs)
+        self._batch_inactive = set(range(num_envs))
+        self._video_finalized_slots = set(range(num_envs))
+
+    @property
+    def num_envs(self) -> int:
+        return self._num_envs
 
     def setup(self) -> None:
         if self._env is not None:
@@ -468,6 +478,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         self._prepare_runtime_paths()
         self._configure_run_identity()
         runtime = _load_prelaunch_runtime()
+        self._configure_task_slots(runtime)
         physx_monitor = runtime.get_physx_monitor()
         log_directory = tempfile.mkdtemp(prefix='fluxthemis-isaac-')
         self._isaac_runtime_dir = Path(log_directory)
@@ -568,6 +579,22 @@ class RoboDojoEnvironment(BaseEnvironment):
                 'selected tasks; a smoke asset subset cannot run task=all.')
         return counts
 
+    def _configure_task_slots(self, runtime: _PrelaunchRuntime) -> None:
+        eval_cfg = runtime.load_yaml(
+            os.path.join(runtime.ENV_CONFIG_PATH, f'{self.env_cfg_type}.yml'))
+        self._sim_cfg = runtime.load_yaml(
+            os.path.join(runtime.ENV_CONFIG_PATH, 'sim',
+                         f"{eval_cfg['config']['sim']}.yml"))
+        self._task_capacities = {
+            task.task_id:
+            runtime.resolve_random_task_num_envs(task.task_id, self.num_envs,
+                                                 self._sim_cfg)
+            for task in self._tasks
+        }
+
+    def task_capacity(self, task: TaskSpec) -> int:
+        return self._task_capacities[task.task_id]
+
     def _create_env_for_active_task(self) -> None:
         if self._runtime is None or self._post is None:
             raise RuntimeError('RoboDojo runtime was not initialized')
@@ -591,9 +618,13 @@ class RoboDojoEnvironment(BaseEnvironment):
             # RoboDojo's native runner to finalize it.
             env._stream_vision = lambda *args, **kwargs: None
         self._env = env
+        self._native_num_envs = env_cfg['eval_cfg']['num_envs']
+        self._batch_requests = [None] * self._native_num_envs
+        self._batch_inactive = set(range(self._native_num_envs))
+        self._video_finalized_slots = set(self._batch_inactive)
 
     def _activate_task(self, task: TaskSpec) -> None:
-        self._finalize_active_episode('truncated')
+        self._finalize_active_episodes('truncated')
         self._close_env_only()
         self._task = task
         self._create_env_for_active_task()
@@ -612,131 +643,25 @@ class RoboDojoEnvironment(BaseEnvironment):
         finally:
             self._episode_active = False
 
-    def _finalize_active_episode(self, tag: str = 'truncated') -> None:
-        if not self._episode_active or self._video_finalized:
+    def _finalize_active_episodes(self, tag: str = 'truncated') -> None:
+        if not self._episode_active:
             return
-        self._finalize_video(self._episode_task, self._episode_index, tag)
-        self._video_finalized = True
+        for slot, request in enumerate(self._batch_requests):
+            if request is not None and slot not in self._video_finalized_slots:
+                self._finalize_video(slot, request, tag)
 
     def tasks(self) -> Sequence[TaskSpec]:
         return self._tasks
 
-    def reset(self, task: TaskSpec, episode_index: int, *,
-              environment_seed: int | None,
-              environment_case_index: int | None) -> tuple[Any, dict]:
-        self._require_setup()
-        task = TaskSpec.from_value(task)
-        if task.task_id not in self._task_ids:
-            raise ValueError(
-                f'RoboDojoEnvironment is configured for tasks '
-                f'{sorted(self._task_ids)!r} but reset() received '
-                f'{task.task_id!r}')
-        if task.task_id != self._task.task_id:
-            self._activate_task(task)
-        else:
-            self._finalize_active_episode('truncated')
-            if self._episode_active:
-                self._close_native_env()
-
-        layout_index = self._nonnegative_integer(environment_case_index,
-                                                 'environment_case_index')
-        if self._physx_monitor is not None:
-            self._physx_monitor.reset()
-        try:
-            self._env.reset(seed=[layout_index])
-        except Exception as exc:
-            if not _is_recoverable_robodojo_case_error(exc):
-                raise
-            self._close_native_env()
-            raise EnvironmentCaseRejected(
-                f'RoboDojo layout {layout_index} is unstable') from exc
-        self._episode_active = True
-        self._episode_task = task
-        self._episode_index = int(episode_index)
-        self._episode_layout_index = layout_index
-        self._video_finalized = False
-        # Native ``EvalEnv.run_eval()`` registers each episode's success
-        # criteria before stepping. FluxThemis bypasses ``run_eval()`` and
-        # drives ``take_action()`` directly, so without this call
-        # ``RewardManager.check_list`` stays empty and ``get_reward()``
-        # reports reward 1.0 for every episode (false 100% success).
-        run_reward = getattr(self._env, 'run_reward', None)
-        if run_reward is not None:
-            run_reward()
-        register_score = getattr(self._env, 'get_score', None)
-        if callable(register_score):
-            register_score()
-        observation = robodojo_obs_to_flat(self._env.get_obs())
-        # EvalEnv.reset() initializes success=True: while end_flag=False,
-        # this means not failed, NOT that the task has been completed.
-        observation['predicates'] = self._completion_predicates()
-        info = {
-            'task_id': task.task_id,
-            'episode_index': int(episode_index),
-            'environment_seed': environment_seed,
-            'environment_case_index': layout_index,
-            'layout_index': layout_index,
-        }
-        if self.completion_diagnostics:
-            info['completion_predicates'] = dict(observation['predicates'])
-        if self.save_videos and self._video_dir is not None:
-            info['video_dir'] = str(self._video_dir)
-        return observation, info
-
-    def step(self, action: Any) -> StepResult:
-        self._require_episode()
-        action_dict = self._action_to_dict(action)
-        try:
-            self._env.take_action(action_dict)
-            observation = robodojo_obs_to_flat(self._env.get_obs())
-        except Exception as exc:
-            if not _is_recoverable_robodojo_case_error(exc):
-                raise
-            raise EnvironmentCaseRejected(
-                f'RoboDojo layout {self._episode_layout_index} became '
-                'unstable') from exc
-        terminated = bool(self._env.end_flag[0])
-        success = bool(self._env.success[0]) if terminated else None
-        # Match StepResult's native terminal success, never the optimistic
-        # running flag or a progress-score threshold.
-        observation['predicates'] = self._completion_predicates()
-        score = self._current_score(success)
-        video_paths: list[str] = []
-        if terminated:
-            tag = 'success' if success else 'fail'
-            video_paths = self._finalize_video(self._episode_task,
-                                               self._episode_index, tag)
-            self._video_finalized = True
-        info = {
-            'task_id': self._task.task_id,
-            'step': int(self._env.take_action_cnt[0]),
-            'score': score,
-            'environment_case_index': self._episode_layout_index,
-            'layout_index': self._episode_layout_index,
-        }
-        if self.completion_diagnostics:
-            info['completion_predicates'] = dict(observation['predicates'])
-        if video_paths:
-            info['video_paths'] = video_paths
-        return StepResult(
-            observation=observation,
-            reward=float(bool(success)) if terminated else 0.0,
-            terminated=terminated,
-            truncated=False,
-            success=success,
-            score=score,
-            info=info,
-        )
-
-    def _completion_predicates(self) -> dict[str, bool | None]:
+    def _completion_predicates(self, slot: int) -> dict[str, bool | None]:
         """Read native criteria without advancing physics or reward state.
 
         Criteria are diagnostics, NOT a substitute for native termination.
         Missing native diagnostic support is unknown, never guessed success.
         """
         facts = dict(
-            environment_success=(
-                bool(self._env.end_flag[0]) and bool(self._env.success[0])))
+            environment_success=(bool(self._env.end_flag[slot])
+                                 and bool(self._env.success[slot])))
         if not self.completion_diagnostics:
             return facts
         facts.update(blocks_stacked=None, arms_at_origin=None)
@@ -754,25 +679,267 @@ class RoboDojoEnvironment(BaseEnvironment):
             checks['arms_at_origin'] = home()
         if callable(evaluate):
             for key, check in checks.items():
-                value = float(evaluate(check, 0))
+                value = float(evaluate(check, slot))
                 if not np.isfinite(value) or not 0 <= value <= 1:
                     raise ValueError('Invalid native completion diagnostic')
                 facts[key] = value > 1 - 1e-3
         return facts
 
-    def finalize_episode(self, *, success: bool,
+    def finalize_episode(self, slot: int, *, success: bool,
                          termination_reason: str) -> dict:
-        if not self._episode_active or self._video_finalized:
+        slot = self._nonnegative_integer(slot, 'slot')
+        if slot >= self._native_num_envs:
+            raise ValueError('slot is outside the native batch')
+        if not self._episode_active:
             return {}
-        tag = ('agent_done' if termination_reason == 'policy_completed' else
-               'success' if success else 'fail'
-               if termination_reason.startswith('policy_') else 'truncated')
-        paths = self._finalize_video(self._episode_task, self._episode_index,
-                                     tag)
-        self._video_finalized = True
+        self._batch_inactive.add(slot)
+        if termination_reason in ('case_rejected', 'interrupted'):
+            self._abort_video(slot)
+            return {}
+        if slot in self._video_finalized_slots:
+            return {}
+        tag = ('agent_done'
+               if termination_reason == 'policy_completed' else 'success' if
+               success else 'fail' if termination_reason.startswith('policy_')
+               or termination_reason == 'terminated' else 'truncated')
+        paths = self._finalize_video(slot, self._batch_requests[slot], tag)
         return {'video_paths': paths} if paths else {}
 
-    def _current_score(self, success: bool | None) -> float:
+    def reset_batch(
+        self, requests: list[EnvironmentResetRequest | None]
+    ) -> list[EnvironmentReset | CaseRejection | EpisodeInterruption | None]:
+        if len(requests) != self.num_envs:
+            raise ValueError('RoboDojo reset requires one entry per slot')
+        active = [
+            slot for slot, request in enumerate(requests)
+            if request is not None
+        ]
+        results = [None] * self.num_envs
+        if not active:
+            return results
+        task = TaskSpec.from_value(requests[active[0]].task)
+        if task.task_id not in self._task_ids:
+            raise ValueError('RoboDojo reset requires a configured task')
+        self._require_setup()
+        if task.task_id != self._task.task_id:
+            self._activate_task(task)
+        if any(request is not None
+               for request in requests[self._native_num_envs:]):
+            raise ValueError(
+                'RoboDojo slots outside the native batch must be None')
+        native_requests = requests[:self._native_num_envs]
+        layouts = [
+            None if request is None else self._nonnegative_integer(
+                request.environment_case_index, 'environment_case_index')
+            for request in native_requests
+        ]
+        if self._episode_active:
+            self._finalize_active_episodes('truncated')
+            self._close_native_env()
+        if self._physx_monitor is not None:
+            self._physx_monitor.reset()
+        # Track even a partly initialized reset so cleanup owns every writer.
+        self._episode_active = True
+        self._batch_requests = native_requests
+        self._batch_inactive = set(range(self._native_num_envs)) - set(active)
+        self._video_finalized_slots = set(self._batch_inactive)
+        rejected, interrupted = self._run_native_batch(
+            lambda: self._env.reset(seed=layouts), active,
+            self._rejected_reset_slots)
+        healthy = [
+            slot for slot in active if slot not in rejected | interrupted
+        ]
+        by_slot = {}
+        if healthy:
+            self._env.run_reward()
+            if callable(getattr(self._env, 'get_score', None)):
+                self._env.get_score()
+            by_slot, rejected_observations = self._observe_slots(
+                healthy, self._rejected_reset_slots)
+            rejected.update(rejected_observations)
+        for slot in active:
+            request = requests[slot]
+            info = self._slot_info(slot, layouts[slot])
+            info.update(
+                task_id=task.task_id,
+                episode_index=request.episode_index,
+                environment_seed=request.environment_seed,
+                layout_index=layouts[slot])
+            if slot in interrupted:
+                info['reason'] = 'RoboDojo reset was interrupted'
+                results[slot] = EpisodeInterruption(info)
+                continue
+            if slot in rejected:
+                info['reason'] = 'RoboDojo initial layout is unstable'
+                results[slot] = CaseRejection(info)
+                continue
+            converted = robodojo_obs_to_flat(by_slot[slot])
+            converted['predicates'] = self._completion_predicates(slot)
+            if self.completion_diagnostics:
+                info['completion_predicates'] = dict(converted['predicates'])
+            if self.save_videos and self._video_dir is not None:
+                info['video_dir'] = str(self._video_dir)
+            results[slot] = EnvironmentReset(converted, info)
+        return results
+
+    def _rejected_reset_slots(self,
+                              active: Sequence[int],
+                              error: BaseException | None = None) -> list[int]:
+        unstable = set(self._rejected_step_slots(active, error))
+        end_flags = getattr(self._env, 'end_flag', ())
+        return [
+            slot for slot in active
+            if slot in unstable or (slot < len(end_flags) and end_flags[slot])
+        ]
+
+    def step_batch(
+        self, actions: list[Any | None]
+    ) -> list[StepResult | CaseRejection | EpisodeInterruption | None]:
+        self._require_episode()
+        if len(actions) != self.num_envs:
+            raise ValueError('RoboDojo step requires one entry per slot')
+        if any(action is not None
+               for action in actions[self._native_num_envs:]):
+            raise ValueError(
+                'RoboDojo slots outside the native batch must be None')
+        active = [
+            slot for slot, action in enumerate(actions) if action is not None
+        ]
+        if self._batch_inactive.intersection(active):
+            raise ValueError('Cannot reactivate a finished RoboDojo slot')
+        action_dicts = [self._action_to_dict(actions[slot]) for slot in active]
+        for slot, action in enumerate(actions[:self._native_num_envs]):
+            if action is None:
+                self._batch_inactive.add(slot)
+                self._env.end_flag[slot] = True
+        results = [None] * self.num_envs
+        if not active:
+            return results
+        # Finished lanes receive no control/reward updates. Native scenes have
+        # separate objects and robots, isolating them from active episodes.
+        rejected, interrupted = self._run_native_batch(
+            lambda: self._env.take_action_batch(
+                action_dicts, env_idx_list=active), active,
+            self._rejected_step_slots)
+        observed = [
+            slot for slot in active if slot not in rejected | interrupted
+        ]
+        by_slot, rejected_observations = self._observe_slots(
+            observed, self._rejected_step_slots)
+        rejected.update(rejected_observations)
+        for slot in active:
+            request = self._batch_requests[slot]
+            info = self._slot_info(slot, request.environment_case_index)
+            if slot in interrupted:
+                info['reason'] = 'RoboDojo did not finish executing the batch'
+                results[slot] = EpisodeInterruption(info)
+                continue
+            if slot in rejected:
+                info['reason'] = 'RoboDojo marked this sample unstable'
+                results[slot] = CaseRejection(info)
+                continue
+            terminated = bool(self._env.end_flag[slot])
+            success = bool(self._env.success[slot]) if terminated else None
+            score = self._current_score(success, slot)
+            converted = robodojo_obs_to_flat(by_slot[slot])
+            converted['predicates'] = self._completion_predicates(slot)
+            info.update(
+                task_id=request.task.task_id,
+                step=int(self._env.take_action_cnt[slot]),
+                score=score,
+                layout_index=request.environment_case_index)
+            results[slot] = StepResult(
+                observation=converted,
+                reward=float(bool(success)) if terminated else 0.0,
+                terminated=terminated,
+                truncated=False,
+                success=success,
+                score=score,
+                info=info)
+            if self.completion_diagnostics:
+                results[slot].info['completion_predicates'] = dict(
+                    converted['predicates'])
+            if terminated:
+                self._batch_inactive.add(slot)
+        return results
+
+    @staticmethod
+    def _slot_info(slot: int, environment_case_index: int) -> dict[str, Any]:
+        return {
+            'environment_case_index': environment_case_index,
+            'environment_slot': slot,
+        }
+
+    def _run_native_batch(
+        self, call: Callable[[], Any], active: Sequence[int],
+        find_bad_slots: Callable[[Sequence[int], BaseException | None],
+                                 list[int]]
+    ) -> tuple[set[int], set[int]]:
+        rejected = set()
+        interrupted = set()
+        try:
+            call()
+        except Exception as exc:
+            if not _is_recoverable_robodojo_case_error(exc):
+                raise
+            rejected.update(find_bad_slots(active, exc) or active)
+            # Native reset/action failures leave initialization or control and
+            # reward work incomplete. Retry peers after closing/resetting.
+            interrupted.update(active)
+        rejected.update(find_bad_slots(active, None))
+        interrupted.difference_update(rejected)
+        self._deactivate_slots(rejected | interrupted)
+        return rejected, interrupted
+
+    def _rejected_step_slots(self,
+                             active: Sequence[int],
+                             error: BaseException | None = None) -> list[int]:
+        unstable = set(getattr(self._env, 'unstable_envs', ()))
+        unstable.update(getattr(error, 'broken_envs', ()))
+        if self._physx_monitor is not None:
+            unstable.update(self._physx_monitor.get_broken_envs())
+        return [slot for slot in active if slot in unstable]
+
+    def _deactivate_slots(self, slots: Iterable[int]) -> None:
+        # Native observations check all live lanes for PhysX errors. Mask bad
+        # lanes before observing their healthy peers, including after reset.
+        end_flags = getattr(self._env, 'end_flag', ())
+        for slot in sorted(slots):
+            self._batch_inactive.add(slot)
+            if slot < len(end_flags):
+                end_flags[slot] = True
+            self._abort_video(slot)
+
+    def _observe_slots(
+        self, active: list[int],
+        find_bad_slots: Callable[[Sequence[int], BaseException | None],
+                                 list[int]]
+    ) -> tuple[dict[int, Any], set[int]]:
+        rejected = set()
+        remaining = list(active)
+        while remaining:
+            try:
+                observations = self._env.get_obs_batch(env_idx_list=remaining)
+            except Exception as exc:
+                if not _is_recoverable_robodojo_case_error(exc):
+                    raise
+                # Each failed capture removes at least one slot. A native
+                # error without slot identities rejects the unobserved slots.
+                rejected.update(find_bad_slots(remaining, exc) or remaining)
+                self._deactivate_slots(rejected)
+                remaining = [
+                    slot for slot in remaining if slot not in rejected
+                ]
+                continue
+            if len(observations) != len(remaining):
+                raise RuntimeError(
+                    'RoboDojo returned an incomplete observation batch')
+            rejected.update(find_bad_slots(remaining, None))
+            self._deactivate_slots(rejected)
+            return dict(zip(remaining, observations)), rejected
+        return {}, rejected
+
+    def _current_score(self, success: bool | None, slot: int) -> float:
         if success:
             return 1.0
         if not callable(getattr(self._env, 'get_score', None)):
@@ -784,7 +951,7 @@ class RoboDojoEnvironment(BaseEnvironment):
                 'RoboDojo task exposes get_score() without a compatible '
                 'reward_manager.get_score()')
         try:
-            score = float(get_score()[0]) / 100.0
+            score = float(get_score()[slot]) / 100.0
         except (IndexError, TypeError, ValueError) as exc:
             raise RuntimeError(
                 'RoboDojo reward manager returned an invalid score') from exc
@@ -794,9 +961,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         return score
 
     def close(self) -> None:
-        if self._episode_active and not self._video_finalized:
-            self._finalize_video(self._episode_task, self._episode_index,
-                                 'truncated')
+        self._finalize_active_episodes('truncated')
         env = self._env
         if env is not None:
             try:
@@ -819,16 +984,17 @@ class RoboDojoEnvironment(BaseEnvironment):
         if self._physx_monitor is not None:
             self._physx_monitor.shutdown()
             self._physx_monitor = None
-        self._video_finalized = True
+        self._video_finalized_slots = set(range(self._native_num_envs))
 
-    def _finalize_video(self, task: TaskSpec | None, episode_index: int | None,
+    def _finalize_video(self, slot: int,
+                        request: EnvironmentResetRequest | None,
                         tag: str) -> list[str]:
         """Finalize RoboDojo's streaming mp4 writers for the active episode."""
-        self._video_finalized = True
+        self._video_finalized_slots.add(slot)
         if (not self.save_videos or self._env is None
                 or self._video_dir is None):
             return []
-        if task is None or episode_index is None:
+        if request is None:
             return []
         save_video = getattr(self._env, 'save_video', None)
         if save_video is None:
@@ -840,7 +1006,8 @@ class RoboDojoEnvironment(BaseEnvironment):
         worker_suffix = ''
         if self.worker_id is not None:
             worker_suffix = f'_worker_{self.worker_id}'
-        base_name = (f'{task.task_id}_episode_{episode_index:07d}'
+        base_name = (f'{request.task.task_id}_episode_'
+                     f'{request.episode_index:07d}'
                      f'{worker_suffix}.mp4')
         native_save_dir = Path(self._env.save_dir)
         if not native_save_dir.is_absolute():
@@ -850,7 +1017,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         captured_output = io.StringIO()
         try:
             with contextlib.redirect_stdout(captured_output):
-                save_video(0, str(local_base), tag)
+                save_video(slot, str(local_base), tag)
             produced = sorted(native_save_dir.glob(f'{local_base.stem}_*.mp4'))
             final_paths = []
             path_replacements = {}
@@ -867,6 +1034,14 @@ class RoboDojoEnvironment(BaseEnvironment):
         if output:
             print(output, end='', flush=True)
         return final_paths
+
+    def _abort_video(self, slot: int) -> None:
+        if slot in self._video_finalized_slots:
+            return
+        self._video_finalized_slots.add(slot)
+        abort = getattr(self._env, '_abort_video_writers', None)
+        if callable(abort):
+            abort(env_idx_list=[slot])
 
     def _configure_run_identity(self) -> None:
         output_run_id = self.run_id
@@ -1046,9 +1221,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         }
         env_cfg = runtime.OmegaConf.create({
             'sim':
-            runtime.load_yaml(
-                os.path.join(runtime.ENV_CONFIG_PATH, 'sim',
-                             f"{config['sim']}.yml")),
+            self._sim_cfg,
             'scene':
             runtime.load_yaml(
                 os.path.join(runtime.ENV_CONFIG_PATH, 'scene',
@@ -1068,13 +1241,14 @@ class RoboDojoEnvironment(BaseEnvironment):
             'deploy_cfg':
             deploy_cfg,
         })
+        native_num_envs = self.task_capacity(self._task)
         env_cfg = runtime.process_randomization(env_cfg)
         env_cfg, _ = runtime.process_config(
             env_cfg, task_name=self._task.task_id)
         runtime.OmegaConf.update(
-            env_cfg, 'sim.scene.num_envs', self.num_envs, force_add=True)
+            env_cfg, 'sim.scene.num_envs', native_num_envs, force_add=True)
         runtime.OmegaConf.update(
-            env_cfg, 'eval_cfg.num_envs', self.num_envs, force_add=True)
+            env_cfg, 'eval_cfg.num_envs', native_num_envs, force_add=True)
         runtime.OmegaConf.update(
             env_cfg,
             'camera.default_frequency',
@@ -1082,7 +1256,7 @@ class RoboDojoEnvironment(BaseEnvironment):
             force_add=True,
         )
         runtime.OmegaConf.update(
-            env_cfg, 'sim.seed', [0] * self.num_envs, force_add=True)
+            env_cfg, 'sim.seed', [0] * native_num_envs, force_add=True)
         return env_cfg
 
     @property
@@ -1177,7 +1351,7 @@ class RoboDojoEnvironment(BaseEnvironment):
         self._require_setup()
         if not self._episode_active:
             raise RuntimeError(
-                'RoboDojoEnvironment.reset() must be called before step()')
+                'RoboDojoEnvironment.reset_batch() must precede step_batch()')
 
     @staticmethod
     def _nonnegative_integer(value: Any, name: str) -> int:

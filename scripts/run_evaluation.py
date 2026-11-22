@@ -429,6 +429,11 @@ def main(argv=None):
         type=int,
         help='Simulator workers per GPU (default: 1).')
     parser.add_argument('--scheduling', choices=['dynamic', 'fixed'])
+    parser.add_argument(
+        '--episode-timeout-s',
+        type=float,
+        help='Time limit in seconds for all scenes in one assignment '
+        '(overrides simulator.episode_timeout_s; default: 3600).')
     parser.add_argument('--cfg-options', nargs='+', action=DictAction)
     parser.add_argument(
         '--output', type=Path, help='Simulator output parent directory.')
@@ -439,7 +444,7 @@ def main(argv=None):
         dest='mode',
         action='store_const',
         const='smoke',
-        help='One task, one episode per simulator worker.')
+        help='One task, one episode per scene.')
     scope.add_argument(
         '--full',
         dest='mode',
@@ -471,7 +476,8 @@ def main(argv=None):
     overrides = {
         key: getattr(args, key)
         for key in ('server_endpoint', 'gpu_ids', 'gpus', 'workers_per_gpu',
-                    'scheduling', 'cfg_options', 'output', 'save_videos')
+                    'scheduling', 'episode_timeout_s', 'cfg_options', 'output',
+                    'save_videos')
     }
     for config in args.config:
         code = run_config(config, args.dry_run, args.resume,

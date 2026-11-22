@@ -1,5 +1,6 @@
 """Resolve simulation launch settings without starting models or simulators."""
 
+import math
 import os
 import re
 import sys
@@ -162,11 +163,14 @@ def load_config(path, *, mode=None, overrides=None):
         restart_limit = 0 if is_robolab else 3
     integer(restart_limit, 'simulator.simulator_restart_limit', minimum=0)
     integer(sim['episode_timeout_s'], 'simulator.episode_timeout_s')
+    episode_timeout_s = overrides.get('episode_timeout_s')
+    if episode_timeout_s is None:
+        episode_timeout_s = sim['episode_timeout_s']
+    if (type(episode_timeout_s) not in (int, float)
+            or not math.isfinite(episode_timeout_s) or episode_timeout_s <= 0):
+        raise ValueError('episode_timeout_s must be a finite positive number')
     if is_robolab:
-        if (isinstance(environment.get('num_envs', 1), bool)
-                or not isinstance(environment.get('num_envs', 1), int)
-                or environment.get('num_envs', 1) != 1):
-            raise ValueError('RoboLab num_envs must be 1')
+        integer(environment.get('num_envs', 1), 'RoboLab num_envs')
         if restart_limit != 0 or resume['from_dir'] or evaluation.get(
                 'resume_path'):
             raise ValueError('RoboLab retries and resume are unsupported')
@@ -216,7 +220,7 @@ def load_config(path, *, mode=None, overrides=None):
             raise ValueError(
                 'Set a smoke task explicitly for this environment')
         task = smoke_tasks[kind]
-        episodes = total_workers
+        episodes = total_workers * evaluation.environment.get('num_envs', 1)
     elif mode == 'full':
         task, episodes = 'all', None
     if task is not None:
@@ -326,7 +330,7 @@ def load_config(path, *, mode=None, overrides=None):
         robotwin_root=robotwin_root,
         robolab_root=robolab_root,
         simulator_restart_limit=restart_limit,
-        episode_timeout_s=sim['episode_timeout_s'],
+        episode_timeout_s=episode_timeout_s,
         assets=assets,
         cache=path_value(sim['cache'], 'simulator.cache', path.parent)
         if sim['cache'] else None,

@@ -12,6 +12,7 @@ import pytest
 from mmengine.config import Config
 
 from fluxthemis.engines.utils import ENVIRONMENTS
+from fluxthemis.environments import EnvironmentResetRequest
 from fluxthemis.environments.sim import robolab as module
 from fluxthemis.environments.sim.robolab import RoboLabEnvironment
 from fluxthemis.structures import TaskSpec
@@ -166,67 +167,121 @@ def test_managed_kit_cache_restores_environment_after_launch_failure(
     assert os.environ['XDG_CACHE_HOME'] == 'original-cache'
 
 
-def _observation(marker=0, dtype=np.float64):
+def _observation(marker=0, dtype=np.float64, capacity=1):
+    slots = np.arange(capacity)
     return {
         'image_obs': {
             'over_shoulder_left_camera':
-            np.full((1, 2, 3, 3), marker, dtype=np.uint8),
+            np.full((capacity, 2, 3, 3), marker, dtype=np.uint8) +
+            slots[:, None, None, None].astype(np.uint8),
             'wrist_cam':
-            np.full((1, 3, 2, 3), marker + 1, dtype=np.uint8),
+            np.full((capacity, 3, 2, 3), marker + 1, dtype=np.uint8) +
+            slots[:, None, None, None].astype(np.uint8),
         },
         'proprio_obs': {
-            'arm_joint_pos': np.arange(7, dtype=dtype)[None] + 0.123456789,
-            'gripper_pos': np.asarray([[0.25]], dtype=dtype),
+            'arm_joint_pos':
+            np.arange(7, dtype=dtype)[None] + 0.123456789 +
+            slots[:, None].astype(dtype),
+            'gripper_pos':
+            np.full((capacity, 1), 0.25, dtype=dtype),
         },
     }
 
 
 class _NativeEnvironment:
 
-    def __init__(self):
-        self.num_envs = 1
+    def __init__(self, num_envs=1):
+        self.num_envs = num_envs
         self.device = 'cpu'
         self.action_manager = SimpleNamespace(total_action_dim=8)
         self.max_episode_length = 6
-        self.episode_length_buf = np.zeros(1, dtype=np.int64)
-        self.all_terminated = False
-        self.result = {'env_id': 0, 'success': None, 'step': None}
+        self.episode_length_buf = np.zeros(num_envs, dtype=np.int64)
+        self._frozen_envs = np.zeros(num_envs, dtype=bool)
+        self._pre_step_frozen = self._frozen_envs.copy()
+        self.results = [
+            dict(env_id=slot, success=None, step=None)
+            for slot in range(num_envs)
+        ]
+        self.recorded = [[] for _ in range(num_envs)]
+        self.exported = {}
+        self.artifact_resets = []
+        self.cleared = []
         self.events = []
         self.actions = []
-        self.raw = _observation()
+        self.raw = _observation(capacity=num_envs)
         self.closed = 0
         self.resets = 0
         self.next_success = None
         self.raw_term = False
         self.raw_trunc = False
         self.recorder_manager = SimpleNamespace(
+            clear=self.clear_recording,
             set_hdf5_file=lambda name: self.events.append(('file', name)),
             set_episode_index=lambda index, **kwargs: self.events.append(
                 ('index', index, kwargs)))
 
     def reset_eval_state(self):
         self.events.append('clear')
-        self.all_terminated = False
-        self.result = {'env_id': 0, 'success': None, 'step': None}
+        self._frozen_envs[:] = False
+        self._pre_step_frozen[:] = False
+        self.results = [
+            dict(env_id=slot, success=None, step=None)
+            for slot in range(self.num_envs)
+        ]
 
     def reset(self, **kwargs):
         self.events.append(('reset', kwargs))
         self.resets += 1
         self.episode_length_buf[:] = 0
-        self.raw = _observation(self.resets)
+        self.raw = _observation(self.resets, capacity=self.num_envs)
+        # Native record_post_reset appends to buffers without clearing them,
+        # filtering out frozen environments.
+        for slot in range(self.num_envs):
+            if not self._frozen_envs[slot]:
+                self.recorded[slot].append(('initial_state', self.resets))
         return self.raw, {}
 
+    def clear_recording(self, env_ids):
+        self.cleared.extend(env_ids)
+        for slot in env_ids:
+            self.recorded[slot] = []
+
+    @property
+    def all_terminated(self):
+        return self._frozen_envs.all()
+
     def get_env_results(self):
-        return [self.result.copy()]
+        return [result.copy() for result in self.results]
 
     def step(self, action):
+        self._pre_step_frozen = self._frozen_envs.copy()
+        action = action.copy()
+        action[self._frozen_envs] = 0
         self.actions.append(action.copy())
         self.episode_length_buf += 1
-        if self.next_success is not None:
-            self.all_terminated = True
-            self.result = dict(env_id=0, success=self.next_success, step=3)
-        return (self.raw, np.asarray([0.125]), np.asarray([self.raw_term]),
-                np.asarray([self.raw_trunc]), {})
+        term = np.broadcast_to(self.raw_term, (self.num_envs, )).copy()
+        trunc = np.broadcast_to(self.raw_trunc, (self.num_envs, )).copy()
+        outcomes = np.broadcast_to(self.next_success, (self.num_envs, ))
+        for slot in range(self.num_envs):
+            if self._pre_step_frozen[slot]:
+                continue
+            self.recorded[slot].append(action[slot].copy())
+            if outcomes[slot] is not None:
+                term[slot] = bool(outcomes[slot])
+                trunc[slot] = not term[slot]
+            if not (term[slot] or trunc[slot]):
+                continue
+            ep_len = int(self.episode_length_buf[slot])
+            if ep_len <= 2:
+                self.artifact_resets.append(slot)
+                self.episode_length_buf[slot] = 0
+                continue
+            self._frozen_envs[slot] = True
+            self.results[slot] = dict(
+                env_id=slot, success=bool(term[slot]), step=ep_len)
+            self.exported[f'demo_{slot}'] = list(self.recorded[slot])
+            self.recorded[slot] = []
+        return (self.raw, np.arange(self.num_envs) + 0.125, term, trunc, {})
 
     def close(self):
         self.closed += 1
@@ -273,7 +328,7 @@ def runtime(monkeypatch):
     }
 
     def create_env(scene, **kwargs):
-        env = _NativeEnvironment()
+        env = _NativeEnvironment(kwargs['num_envs'])
         state.created.append((scene, kwargs, env))
         return env, configs[scene]()
 
@@ -294,6 +349,8 @@ def runtime(monkeypatch):
         select_instruction_fields=lambda fields, requested:
         {requested: fields[requested]},
         torch=SimpleNamespace(
+            Tensor=np.ndarray,
+            bool=np.dtype('bool'),
             float32=np.float32,
             as_tensor=lambda values, dtype, device: np.asarray(
                 values, dtype=dtype),
@@ -307,8 +364,8 @@ def runtime(monkeypatch):
     monkeypatch.setattr(module, '_load_postlaunch_runtime', postlaunch)
     state.metrics_calls = []
 
-    def metrics(path, dt, success, steps):
-        state.metrics_calls.append((path, dt, success, steps))
+    def metrics(path, dt, success, steps, demo_key='demo_0'):
+        state.metrics_calls.append((path, dt, success, steps, demo_key))
         return (1.0 if success else 0.5), dict(
             metrics={
                 'ee_speed_mean': 0.03,
@@ -332,11 +389,10 @@ def environment(runtime, tmp_path):
 
 
 def _reset(env, index=0, task=0):
-    return env.reset(
-        env.tasks()[task],
-        index,
-        environment_seed=11 + index,
-        environment_case_index=index)
+    result = env.reset_batch(
+        [EnvironmentResetRequest(env.tasks()[task], index, 11 + index,
+                                 index)])[0]
+    return result.observation, result.info
 
 
 def test_reuse_switch_seed_and_reset_order(environment, runtime):
@@ -349,7 +405,7 @@ def test_reuse_switch_seed_and_reset_order(environment, runtime):
                                  ('index', 0, {
                                      'env_ids': [0]
                                  })]
-    native.all_terminated = True
+    native._frozen_envs[:] = True
     _, second = _reset(env, 1)
     assert len(runtime.created) == 1
     assert not native.all_terminated
@@ -384,7 +440,7 @@ def test_observation_preserves_values_and_owns_memory(environment, runtime,
     native = runtime.created[0][2]
     native.raw = _observation(dtype=dtype)
     original = native.raw['proprio_obs']['arm_joint_pos'].copy()
-    obs = environment.step(np.zeros(8)).observation
+    obs = environment.step_batch([np.zeros(8)])[0].observation
     assert obs['states'].dtype == dtype
     np.testing.assert_array_equal(obs['states'][:7], original[0])
     assert obs['states'][7] == 0.25
@@ -395,7 +451,7 @@ def test_observation_preserves_values_and_owns_memory(environment, runtime,
     native.raw['image_obs']['wrist_cam'][:] = 99
     np.testing.assert_array_equal(obs['states'][:7], original[0])
     assert obs['wrist_cam'][0, 0, 0] == 1
-    frame = environment.render()
+    frame = environment.render(0)
     frame[:] = 99
     assert obs['over_shoulder_left_camera'][0, 0, 0] == 0
 
@@ -405,7 +461,7 @@ def test_absolute_actions_are_passed_once(environment, runtime, gripper):
     _reset(environment)
     action = np.arange(8, dtype=np.float64) + 0.25
     action[7] = gripper
-    result = environment.step(action)
+    result = environment.step_batch([action])[0]
     received = runtime.created[0][2].actions[0]
     assert received.shape == (1, 8)
     assert received.dtype == np.float32
@@ -429,7 +485,7 @@ def test_absolute_actions_are_passed_once(environment, runtime, gripper):
 def test_bad_action_never_reaches_sim(environment, runtime, action, error):
     _reset(environment)
     with pytest.raises(error):
-        environment.step(action)
+        environment.step_batch([action])[0]
     assert runtime.created[0][2].actions == []
 
 
@@ -438,39 +494,49 @@ def test_native_aggregate_is_authoritative(environment, runtime, success):
     _reset(environment)
     native = runtime.created[0][2]
     native.raw_term = True
-    early = environment.step(np.zeros(8))
+    early = environment.step_batch([np.zeros(8)])[0]
     assert early.info['raw_terminated'] is True
     assert early.success is None
     assert not early.terminated and not early.truncated
     assert native.resets == 2  # No wrapper reset for an artifact signal.
-    native.next_success = success
     native.raw_term = False
-    native.raw_trunc = not success
-    final = environment.step(np.zeros(8))
+    native.raw_trunc = False
+    for _ in range(2):
+        environment.step_batch([np.zeros(8)])
+    native.next_success = success
+    final = environment.step_batch([np.zeros(8)])[0]
     assert final.success is success
     assert final.terminated is success
     assert final.truncated is (not success)
     assert final.info['native_result']['step'] == 3
-    assert final.info['wrapper_steps'] == 2
+    assert final.info['wrapper_steps'] == 4
     with pytest.raises(RuntimeError, match='ended'):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
 
 
-def test_missing_frozen_result_is_error(environment, runtime):
+def test_missing_frozen_result_is_error(environment, runtime, monkeypatch):
     _reset(environment)
-    runtime.created[0][2].all_terminated = True
+    native = runtime.created[0][2]
+    original = native.step
+
+    def freeze_without_result(action):
+        result = original(action)
+        native._frozen_envs[:] = True
+        return result
+
+    monkeypatch.setattr(native, 'step', freeze_without_result)
     with pytest.raises(RuntimeError, match='result'):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
     with pytest.raises(RuntimeError):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
 
 
 def test_outer_native_budget_without_result_is_error(environment, runtime):
     _reset(environment)
     for _ in range(5):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
     with pytest.raises(RuntimeError, match='limit'):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
     assert len(runtime.created[0][2].actions) == 6
 
 
@@ -490,7 +556,7 @@ def test_bad_observation_is_rejected(environment, runtime, group, key, value,
     else:
         native.raw[group][key] = value
     with pytest.raises(error):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
 
 
 def test_setup_failure_closes_app(runtime, tmp_path):
@@ -527,13 +593,10 @@ def test_activation_failure_closes_native_and_app(runtime, tmp_path):
 
 def test_close_is_idempotent_and_state_guards(environment, runtime):
     with pytest.raises(RuntimeError, match='reset'):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
     with pytest.raises(KeyError):
-        environment.reset(
-            TaskSpec('unknown'),
-            0,
-            environment_seed=0,
-            environment_case_index=0)
+        environment.reset_batch(
+            [EnvironmentResetRequest(TaskSpec('unknown'), 0, 0, 0)])[0]
     assert not runtime.created
     _reset(environment)
     environment.close()
@@ -563,6 +626,7 @@ sys.meta_path.insert(0, Block())
 before = dict(os.environ)
 import fluxthemis
 from fluxthemis.engines.utils import ENVIRONMENTS
+from fluxthemis.environments import EnvironmentResetRequest
 from mmengine.config import Config
 cfg = Config.fromfile('configs/robolab/droid.py')
 env = ENVIRONMENTS.build(cfg.themis.evaluation.environment)
@@ -573,15 +637,15 @@ for name in ['LiberoEnvironment', 'RoboCasaEnvironment',
     assert ENVIRONMENTS.get(name) is not None
 old = ENVIRONMENTS.build(dict(type='MockEnvironment', success_after=1))
 old.setup()
-old.reset(old.tasks()[0], 0, environment_seed=0, environment_case_index=0)
-assert old.step([0.0]).success
+old.reset_batch([EnvironmentResetRequest(old.tasks()[0], 0, 0, 0)])
+assert old.step_batch([[0.0]])[0].success
 old.close()
 gym = ENVIRONMENTS.build(dict(type='GymnasiumEnvironment',
                              env_id='FrozenLake-v1',
                              make_kwargs=dict(is_slippery=False)))
 gym.setup()
-gym.reset(gym.tasks()[0], 0, environment_seed=0, environment_case_index=0)
-gym.step(0)
+gym.reset_batch([EnvironmentResetRequest(gym.tasks()[0], 0, 0, 0)])
+gym.step_batch([0])
 gym.close()
 '''
     result = subprocess.run([sys.executable, '-c', script],
@@ -598,6 +662,7 @@ def test_config_contract():
     cfg = Config.fromfile(str(root / 'configs/robolab/droid.py'))
     env = ENVIRONMENTS.build(cfg.themis.evaluation.environment)
     assert isinstance(env, RoboLabEnvironment)
+    assert env.num_envs == 1
     assert env.task_names == ('all', )
     assert cfg.themis.evaluation.episodes_per_task == 10
     assert cfg.themis.transport.state_keys == ['states']
@@ -827,16 +892,18 @@ def test_cpu_limit_rejects_unknown_launcher_interface():
 def test_terminal_score_and_metrics_are_collected_once(environment, runtime):
     _reset(environment)
     native = runtime.created[0][2]
-    assert environment.step(np.zeros(8)).score is None
+    assert environment.step_batch([np.zeros(8)])[0].score is None
     assert runtime.metrics_calls == []
+    environment.step_batch([np.zeros(8)])
     native.next_success = False
-    result = environment.step(np.zeros(8))
+    result = environment.step_batch([np.zeros(8)])[0]
     assert result.score == 0.5 and result.success is False
     assert result.info['metrics']['ee_speed_mean'] == 0.03
     assert len(runtime.metrics_calls) == 1
-    path, dt, success, steps = runtime.metrics_calls[0]
+    path, dt, success, steps, demo_key = runtime.metrics_calls[0]
     assert path.endswith('run_0.hdf5') and dt == 1 / 15
     assert not success and steps == 3
+    assert demo_key == 'demo_0'
 
 
 @pytest.mark.parametrize('artifact_step', [1, 2])
@@ -856,33 +923,36 @@ def test_internal_early_reset_never_extends_outer_budget(
 
     monkeypatch.setattr(native, 'step', step)
     for _ in range(5):
-        environment.step(np.zeros(8))
+        environment.step_batch([np.zeros(8)])[0]
     if eventual_success:
         native.next_success = True
-        result = environment.step(np.zeros(8))
+        result = environment.step_batch([np.zeros(8)])[0]
         assert result.success and result.info['wrapper_steps'] == 6
     else:
         with pytest.raises(
                 RuntimeError, match='native_episode_step=.*raw_terminated'):
-            environment.step(np.zeros(8))
-        assert environment._steps == 6
+            environment.step_batch([np.zeros(8)])[0]
+        assert environment._steps == [6]
         assert native.episode_length_buf[0] == 6 - artifact_step
 
 
-@pytest.mark.parametrize('value', [True, False, 0, -1, 2, 10])
-def test_single_environment_rejected_before_runtime(value):
+@pytest.mark.parametrize('value', [True, False, 0, -1, 1.5, '3'])
+def test_invalid_capacity_rejected_before_runtime(value):
     with pytest.raises((ValueError, TypeError), match='num_envs'):
         RoboLabEnvironment(task_name='all', num_envs=value)
 
 
-def test_two_tasks_ten_scalar_episodes_keep_native_rules(environment, runtime):
+def test_two_tasks_ten_episodes_keep_native_rules(environment, runtime):
     outcomes = []
     for task_index in range(2):
         for episode in range(10):
             _reset(environment, episode, task_index)
             native = runtime.created[-1][2]
+            native.next_success = None
+            for _ in range(2):
+                environment.step_batch([np.zeros(8)])
             native.next_success = episode % 2 == 0
-            result = environment.step(np.zeros(8))
+            result = environment.step_batch([np.zeros(8)])[0]
             outcomes.append(result.success)
             assert result.score == (1.0 if result.success else 0.5)
     assert outcomes.count(True) == outcomes.count(False) == 10
@@ -894,7 +964,7 @@ def test_two_tasks_ten_scalar_episodes_keep_native_rules(environment, runtime):
     assert len({str(item[0]) for item in runtime.metrics_calls}) == 20
 
 
-def test_full_scalar_manifest_keeps_120_times_ten_jobs():
+def test_full_manifest_keeps_120_times_ten_jobs():
     from fluxthemis.engines.runners.episode import build_episode_jobs
     tasks = tuple(TaskSpec(f'task-{i}') for i in range(120))
     jobs = build_episode_jobs(tasks, 10, 0, 'scalar-full')
@@ -903,3 +973,282 @@ def test_full_scalar_manifest_keeps_120_times_ten_jobs():
     assert all(
         sum(job.task.task_id == task.task_id for job in jobs) == 10
         for task in tasks)
+
+
+@pytest.fixture(params=[1, 3])
+def batch_environment(runtime, tmp_path, request):
+    env = RoboLabEnvironment(
+        'TaskA', num_envs=request.param, output_dir=tmp_path)
+    env.setup()
+    requests = [
+        EnvironmentResetRequest(env.tasks()[0], slot, 11 + slot, slot)
+        for slot in range(env.num_envs)
+    ]
+    yield env, runtime, requests
+    env.close()
+
+
+def test_slots_keep_observations_outcomes_and_metrics(batch_environment):
+    env, runtime, requests = batch_environment
+    resets = env.reset_batch(requests)
+    native = runtime.created[-1][2]
+    assert env.requires_single_task
+    assert env.task_capacity(env.tasks()[0]) == len(requests)
+    assert native.events[:3] == ['clear', ('reset', {}), ('reset', {})]
+    assert native.events[3:] == [('file', 'run_0.hdf5')] + [
+        ('index', slot, dict(env_ids=[slot])) for slot in range(env.num_envs)
+    ]
+    for slot, reset in enumerate(resets):
+        assert reset.info['environment_slot'] == slot
+        assert reset.info['native_demo_key'] == f'demo_{slot}'
+        assert reset.observation['states'][0] == slot + 0.123456789
+        assert env.render(slot)[0, 0, 0] == 2 + slot
+    actions = [np.full(8, slot + 1.) for slot in range(env.num_envs)]
+    for _ in range(2):
+        transitions = env.step_batch(actions)
+        assert [r.reward for r in transitions
+                ] == [slot + 0.125 for slot in range(env.num_envs)]
+        assert all(r.success is None for r in transitions)
+    for slot in range(env.num_envs):
+        success = slot % 2 == 0
+        native.next_success = [None] * env.num_envs
+        native.next_success[slot] = success
+        transitions = env.step_batch(actions)
+        result = transitions[slot]
+        assert result.success is success
+        assert result.terminated is success
+        assert result.truncated is not success
+        assert result.score == (1.0 if success else 0.5)
+        assert result.info['native_result'] == dict(
+            env_id=slot, success=success, step=3 + slot)
+        assert result.info['wrapper_steps'] == 3 + slot
+        assert result.info['native_episode_step'] == 3 + slot
+        assert result.info['native_demo_key'] == f'demo_{slot}'
+        assert runtime.metrics_calls[-1][2:] == (success, 3 + slot,
+                                                 f'demo_{slot}')
+        assert transitions[:slot] == [None] * slot
+        assert all(r.success is None for r in transitions[slot + 1:])
+        assert np.all(native.actions[-1][:slot] == 0)
+        actions[slot] = None
+    assert len(runtime.metrics_calls) == env.num_envs
+    assert set(
+        native.exported) == {f'demo_{slot}'
+                             for slot in range(env.num_envs)}
+    assert env.step_batch(actions) == [None] * env.num_envs
+    assert len(runtime.metrics_calls) == env.num_envs
+
+
+def test_partial_assignment_freezes_empty_slots_before_recording(
+        batch_environment):
+    env, runtime, requests = batch_environment
+    inactive = [None] * (env.num_envs - 1)
+    resets = env.reset_batch([*inactive, requests[-1]])
+    native = runtime.created[-1][2]
+    assert resets[:-1] == inactive
+    assert native._frozen_envs.tolist() == [True] * len(inactive) + [False]
+    assert native.cleared == list(range(len(inactive)))
+    assert native.recorded[:-1] == [[] for _ in inactive]
+    assert all(env.render(slot) is None for slot in range(len(inactive)))
+    actions = [*inactive, np.ones(8)]
+    for _ in range(2):
+        assert env.step_batch(actions)[:-1] == inactive
+    native.next_success = True
+    results = env.step_batch(actions)
+    assert results[:-1] == inactive and results[-1].success
+    assert native.recorded[:-1] == [[] for _ in inactive]
+    assert list(native.exported) == [f'demo_{env.num_envs - 1}']
+    assert all(result['success'] is None for result in native.results[:-1])
+
+
+def test_empty_slot_reuse_does_not_export_previous_initial_states(
+        runtime, tmp_path):
+    env = RoboLabEnvironment('TaskA', num_envs=2, output_dir=tmp_path)
+    env.setup()
+    try:
+        task = env.tasks()[0]
+        requests = [
+            EnvironmentResetRequest(task, slot, None, None)
+            for slot in range(2)
+        ]
+        env.reset_batch([None, requests[1]])
+        native = runtime.created[-1][2]
+        for _ in range(2):
+            env.step_batch([None, np.ones(8)])
+        native.next_success = True
+        env.step_batch([None, np.ones(8)])
+        assert 'demo_0' not in native.exported
+
+        env.reset_batch(requests)
+        assert runtime.created[-1][2] is native
+        native.next_success = None
+        for _ in range(2):
+            env.step_batch([np.ones(8), np.ones(8)])
+        native.next_success = True
+        results = env.step_batch([np.ones(8), np.ones(8)])
+        assert all(result.success for result in results)
+        for slot in range(2):
+            recording = native.exported[f'demo_{slot}']
+            # Both native resets record an initial state; only this run's
+            # records may precede its three actions.
+            assert recording[:2] == [('initial_state', 3),
+                                     ('initial_state', 4)]
+            assert len(recording) == 5
+            for action in recording[2:]:
+                np.testing.assert_array_equal(action, np.ones(8))
+    finally:
+        env.close()
+
+
+def test_unrecorded_slots_can_end_without_recorder(batch_environment):
+    env, runtime, requests = batch_environment
+    env.reset_batch(requests)
+    native = runtime.created[-1][2]
+    native.recorder_manager = None
+    env.reset_batch([requests[0]] + [None] * (env.num_envs - 1))
+    assert native._frozen_envs.tolist() == [False] + [True] * (
+        env.num_envs - 1)
+    env.finalize_episode(
+        0, success=False, termination_reason='policy_completed')
+    assert native.all_terminated
+
+
+@pytest.mark.parametrize('reason', ['policy_completed', 'max_steps'])
+def test_external_completion_freezes_only_its_slot(batch_environment, reason):
+    env, runtime, requests = batch_environment
+    env.reset_batch(requests)
+    native = runtime.created[-1][2]
+    actions = [np.ones(8) for _ in requests]
+    env.step_batch(actions)
+    assert env.finalize_episode(
+        0, success=False, termination_reason=reason) == {}
+    assert native._frozen_envs.tolist() == [True] + [False] * (
+        env.num_envs - 1)
+    actions[0] = None
+    results = env.step_batch(actions)
+    assert results[0] is None
+    assert all(result.info['wrapper_steps'] == 2 for result in results[1:])
+    assert not native.recorded[0]
+    assert native.cleared == [0]
+    assert all(len(recording) == 4 for recording in native.recorded[1:])
+    assert not native.exported and not runtime.metrics_calls
+    with pytest.raises(RuntimeError, match='ended'):
+        env.step_batch([np.ones(8)] + actions[1:])
+    for slot in range(1, env.num_envs):
+        env.finalize_episode(slot, success=False, termination_reason=reason)
+    env.reset_batch(requests)
+    actions = [np.ones(8) for _ in requests]
+    for _ in range(2):
+        env.step_batch(actions)
+    native.next_success = True
+    env.step_batch(actions)
+    assert all(len(recording) == 5 for recording in native.exported.values())
+
+
+@pytest.mark.parametrize('artifact_step', [1, 2])
+def test_early_native_reset_keeps_each_slot_running(batch_environment,
+                                                    artifact_step):
+    env, runtime, requests = batch_environment
+    env.reset_batch(requests)
+    native = runtime.created[-1][2]
+    actions = [np.ones(8) for _ in requests]
+    for _ in range(artifact_step - 1):
+        env.step_batch(actions)
+    native.raw_term = True
+    results = env.step_batch(actions)
+    assert native.artifact_resets == list(range(env.num_envs))
+    assert not native._frozen_envs.any()
+    assert all(r.success is None and not r.terminated and not r.truncated
+               for r in results)
+    assert all(r.info['native_episode_step'] == 0 for r in results)
+    assert not native.exported and not runtime.metrics_calls
+    native.raw_term = False
+    for _ in range(2):
+        env.step_batch(actions)
+    native.next_success = True
+    results = env.step_batch(actions)
+    assert all(r.success for r in results)
+    assert all(r.info['native_result']['step'] == 3 for r in results)
+    assert all(r.info['wrapper_steps'] == artifact_step + 3 for r in results)
+
+
+def test_each_slot_must_finish_within_native_outer_budget(batch_environment):
+    env, runtime, requests = batch_environment
+    for stalled in range(env.num_envs):
+        env.reset_batch(requests)
+        native = runtime.created[-1][2]
+        native.next_success = None
+        actions = [np.ones(8) for _ in requests]
+        for _ in range(2):
+            env.step_batch(actions)
+        native.next_success = [False] * env.num_envs
+        native.next_success[stalled] = None
+        results = env.step_batch(actions)
+        actions = [
+            action if result.success is None else None
+            for action, result in zip(actions, results)
+        ]
+        for _ in range(2):
+            env.step_batch(actions)
+        with pytest.raises(RuntimeError, match=f'limit.*slot={stalled}'):
+            env.step_batch(actions)
+
+
+@pytest.mark.parametrize('malformed',
+                         ['missing', 'list', 'dtype', 'length', 'rank'])
+@pytest.mark.parametrize('operation', ['reset', 'finalize', 'step'])
+def test_private_freeze_contract_is_checked(batch_environment, malformed,
+                                            operation):
+    env, runtime, requests = batch_environment
+    env.reset_batch(requests)
+    native = runtime.created[-1][2]
+    if malformed == 'missing':
+        del native._frozen_envs
+    else:
+        native._frozen_envs = {
+            'list': [False] * env.num_envs,
+            'dtype': np.zeros(env.num_envs, dtype=np.int64),
+            'length': np.zeros(env.num_envs + 1, dtype=bool),
+            'rank': np.zeros((env.num_envs, 1), dtype=bool),
+        }[malformed]
+    with pytest.raises(RuntimeError, match='_frozen_envs.*boolean tensor'):
+        if operation == 'reset':
+            # Bypass the native double's own use of the invalid mask.
+            native.reset_eval_state = lambda: None
+            native.reset = lambda: (native.raw, {})
+            env.reset_batch(requests)
+        elif operation == 'finalize':
+            env.finalize_episode(
+                0, success=False, termination_reason='max_steps')
+        else:
+            env.step_batch([np.zeros(8) for _ in requests])
+
+
+def test_nonfinite_observation_reports_real_slot(batch_environment):
+    env, runtime, requests = batch_environment
+    for slot in range(env.num_envs):
+        env.reset_batch(requests)
+        native = runtime.created[-1][2]
+        native.raw['proprio_obs']['arm_joint_pos'][slot, 2] = np.nan
+        with pytest.raises(module.NonFiniteObservationError) as error:
+            env.step_batch([np.zeros(8) for _ in requests])
+        assert error.value.details['lane'] == slot
+        assert error.value.details['invalid_indices'] == [[2]]
+
+
+@pytest.mark.parametrize('bad', [
+    np.zeros(7), [False] * 8, [0.] * 7 + [True],
+    np.full(8, np.nan),
+    np.full(8, np.inf),
+    np.full(8, 1e100)
+])
+def test_invalid_action_in_any_slot_precedes_native_step(
+        batch_environment, bad):
+    env, runtime, requests = batch_environment
+    env.reset_batch(requests)
+    native = runtime.created[-1][2]
+    for slot in range(env.num_envs):
+        actions = [np.zeros(8) for _ in requests]
+        actions[slot] = bad
+        with pytest.raises((TypeError, ValueError)):
+            env.step_batch(actions)
+        assert native.actions == []

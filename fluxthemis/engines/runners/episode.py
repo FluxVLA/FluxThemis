@@ -7,18 +7,23 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any, Callable
 
 import numpy as np
 
-from fluxthemis.environments.base import BaseEnvironment
+from fluxthemis.environments.base import (BaseEnvironment,
+                                          EnvironmentResetRequest)
 from fluxthemis.model_clients.base import BasePolicyClient
-from fluxthemis.structures import (ActionChunk, EpisodeResult, PolicyStop,
-                                   StepResult, TaskSpec)
+from fluxthemis.structures import (ActionChunk, CaseRejection,
+                                   EnvironmentReset, EpisodeInterruption,
+                                   EpisodeResult, PolicyStop, StepResult,
+                                   TaskSpec)
 
+from .assignment import EpisodeAssignment, ExecutionPolicy
 from .video import EpisodeVideoRecorder
 
 
@@ -103,7 +108,7 @@ def build_episode_jobs(
     base_seed: int,
     run_session_id: str,
     episodes_per_task_overrides: Mapping[str, int] | None = None
-) -> tuple[EpisodeJob, ...]:
+) -> list[EpisodeJob]:
     """Build stable task-major jobs independent of worker completion order.
 
     Seeds advance globally, while environment cases restart at zero for every
@@ -131,7 +136,7 @@ def build_episode_jobs(
                     episode_id=episode_id,
                 ))
             global_index += 1
-    return tuple(jobs)
+    return jobs
 
 
 def configure_worker_lifetime(parent_pid: int | None = None) -> None:
@@ -155,166 +160,274 @@ def configure_worker_lifetime(parent_pid: int | None = None) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
-def execute_episode(environment: BaseEnvironment,
-                    policy_client: BasePolicyClient,
-                    job: EpisodeJob,
-                    max_episode_steps: int,
-                    execute_horizon: int | None,
-                    stop_on_success: bool,
-                    on_episode_started: Callable[[], None] | None = None,
-                    save_videos: bool = False,
-                    video_dir: str | os.PathLike | None = None,
-                    video_fps: int = 20,
-                    video_worker_id: str | None = None) -> EpisodeResult:
-    """Execute one episode using components local to the current process."""
-    observation, reset_info = environment.reset(
-        job.task,
-        job.episode_index,
-        environment_seed=job.environment_seed,
-        environment_case_index=job.environment_case_index,
-    )
-    if not isinstance(reset_info, Mapping):
-        raise TypeError('Environment reset info must be a mapping')
-    policy_client.reset(job.task, job.episode_index, job.policy_seed)
-    policy_client.set_episode_id(job.episode_id)
-    if on_episode_started is not None:
-        on_episode_started()
-
-    started = time.perf_counter()
-    episode_return = 0.0
-    steps = 0
-    model_calls = 0
-    prediction_metadata: list[Mapping[str, Any]] = []
-    success = False
+@dataclass
+class _EpisodeState:
+    job: EpisodeJob
+    policy_client: BasePolicyClient
+    observation: Any
+    info: dict
+    started: float = field(default_factory=time.perf_counter)
+    actions: deque = field(default_factory=deque)
+    episode_return: float = 0.0
+    steps: int = 0
+    model_calls: int = 0
+    prediction_metadata: list = field(default_factory=list)
+    success: bool = False
     score: float | None = None
-    termination_reason = 'max_steps'
-    latest_info = dict(reset_info)
-    episode_done = False
-    recorder = None
-    if save_videos and not environment.supports_native_video_recording:
-        if video_dir is None:
-            raise ValueError('video_dir is required when saving videos')
-        recorder = EpisodeVideoRecorder(
-            video_dir, fps=video_fps, worker_id=video_worker_id)
-        recorder.start(job.task.task_id, job.episode_index)
+    termination_reason: str | None = None
+    result: EpisodeResult | None = None
 
-    try:
-        if recorder is not None:
-            recorder.capture(environment)
-        while steps < max_episode_steps and not episode_done:
+    def next_action(self, execute_horizon: int | None) -> np.ndarray | None:
+        if not self.actions:
             context = build_context(
-                task=job.task,
-                episode_index=job.episode_index,
-                policy_seed=job.policy_seed,
-                info=latest_info,
-                episode_id=job.episode_id,
-                observation=observation,
-                executed_steps=steps,
-            )
-            action_chunk = policy_client.predict_action(observation, context)
-            if isinstance(action_chunk, PolicyStop):
-                # Expected policy termination: do NOT step, guess actions,
-                # overwrite benchmark truth, or kill/retry the worker.
-                model_calls += 1
-                prediction_metadata.append(dict(action_chunk.metadata))
-                latest_info['policy_stop'] = dict(
-                    status=action_chunk.status, reason=action_chunk.reason)
-                termination_reason = f'policy_{action_chunk.status}'
-                if action_chunk.status == 'completed':
-                    # Self-declared completion stops execution without a
-                    # simulator veto. Keep benchmark truth separate.
-                    latest_info['agent_success'] = True
-                    latest_info['completion_source'] = 'agent_visual'
+                self.job.task,
+                self.job.episode_index,
+                self.job.policy_seed,
+                self.info,
+                self.job.episode_id,
+                self.observation,
+                executed_steps=self.steps)
+            chunk = self.policy_client.predict_action(self.observation,
+                                                      context)
+            if isinstance(chunk, PolicyStop):
+                self.model_calls += 1
+                self.prediction_metadata.append(dict(chunk.metadata))
+                self.info['policy_stop'] = dict(
+                    status=chunk.status, reason=chunk.reason)
+                self.termination_reason = f'policy_{chunk.status}'
+                if chunk.status == 'completed':
+                    # Agent completion is separate from benchmark success.
+                    self.info['agent_success'] = True
+                    self.info['completion_source'] = 'agent_visual'
                 print(
-                    f'[FluxThemis] episode {job.episode_id} stopped: '
-                    f'{termination_reason} ({action_chunk.reason}), '
-                    f'steps={steps}; recording outcome and continuing',
+                    f'[FluxThemis] episode {self.job.episode_id} stopped: '
+                    f'{self.termination_reason} ({chunk.reason}), '
+                    f'steps={self.steps}; recording outcome and continuing',
                     flush=True)
-                break
-            actions = validate_action_chunk(action_chunk)
-            if not isinstance(action_chunk.metadata, Mapping):
+                return None
+            actions = validate_action_chunk(chunk)
+            if not isinstance(chunk.metadata, Mapping):
                 raise TypeError('ActionChunk.metadata must be a mapping')
-            prediction_metadata.append(dict(action_chunk.metadata))
-            model_calls += 1
+            self.prediction_metadata.append(dict(chunk.metadata))
+            self.model_calls += 1
             horizon = (
                 len(actions) if execute_horizon is None else min(
                     len(actions), execute_horizon))
+            self.actions.extend(action.copy() for action in actions[:horizon])
+        return self.actions.popleft()
 
-            for action in actions[:horizon]:
-                transition = environment.step(action.copy())
-                if not isinstance(transition, StepResult):
-                    raise TypeError(
-                        'Environment.step() must return a StepResult')
-                if not isinstance(transition.info, Mapping):
-                    raise TypeError('StepResult.info must be a mapping')
-                observation = transition.observation
-                policy_client.observe(observation)
-                episode_return += float(transition.reward)
-                steps += 1
-                latest_info = dict(transition.info)
-                if recorder is not None:
-                    recorder.capture(environment)
-                if transition.success is not None:
-                    success = success or bool(transition.success)
-                if transition.score is not None:
-                    step_score = float(transition.score)
-                    if not np.isfinite(step_score):
-                        raise ValueError(
-                            'Environment returned a non-finite episode score')
-                    if not 0.0 <= step_score <= 1.0:
-                        raise ValueError(
-                            'Environment episode score must be in [0, 1]')
-                    score = step_score
+    def advance(self, transition: StepResult, max_episode_steps: int,
+                stop_on_success: bool) -> None:
+        if not isinstance(transition, StepResult):
+            raise TypeError('Active environment slot must return a StepResult')
+        if not isinstance(transition.info, Mapping):
+            raise TypeError('StepResult.info must be a mapping')
+        self.observation = transition.observation
+        self.policy_client.observe(self.observation)
+        self.episode_return += float(transition.reward)
+        self.steps += 1
+        self.info = dict(transition.info)
+        if transition.success is not None:
+            self.success = self.success or bool(transition.success)
+        if transition.score is not None:
+            score = float(transition.score)
+            if not np.isfinite(score):
+                raise ValueError(
+                    'Environment returned a non-finite episode score')
+            if not 0.0 <= score <= 1.0:
+                raise ValueError('Environment episode score must be in [0, 1]')
+            self.score = score
+        if self.success and stop_on_success:
+            self.termination_reason = 'success'
+        elif transition.terminated:
+            self.termination_reason = 'terminated'
+        elif transition.truncated:
+            self.termination_reason = 'truncated'
+        elif self.steps >= max_episode_steps:
+            self.termination_reason = 'max_steps'
 
-                if success and stop_on_success:
-                    termination_reason = 'success'
-                    episode_done = True
-                elif transition.terminated:
-                    termination_reason = 'terminated'
-                    episode_done = True
-                elif transition.truncated:
-                    termination_reason = 'truncated'
-                    episode_done = True
-                elif steps >= max_episode_steps:
-                    termination_reason = 'max_steps'
-                    episode_done = True
-                if episode_done:
-                    break
-        final_info = environment.finalize_episode(
-            success=success, termination_reason=termination_reason)
-        if not isinstance(final_info, Mapping):
-            raise TypeError('Environment finalization info must be a mapping')
-        latest_info.update(final_info)
-        if recorder is not None:
-            recorded_paths = recorder.finish(success)
-            if recorded_paths:
-                existing_paths = latest_info.get('video_paths', [])
-                if isinstance(existing_paths, str):
-                    existing_paths = [existing_paths]
-                elif not isinstance(existing_paths, (list, tuple)):
-                    raise TypeError('video_paths must be a sequence of paths')
-                latest_info['video_paths'] = [*existing_paths, *recorded_paths]
-    except BaseException:
+    def finish(self) -> EpisodeResult:
+        self.result = EpisodeResult(
+            task_id=self.job.task.task_id,
+            episode_index=self.job.episode_index,
+            policy_seed=self.job.policy_seed,
+            environment_seed=self.job.environment_seed,
+            environment_case_index=self.job.environment_case_index,
+            success=self.success,
+            episode_return=self.episode_return,
+            steps=self.steps,
+            duration_s=time.perf_counter() - self.started,
+            termination_reason=self.termination_reason,
+            model_calls=self.model_calls,
+            score=self.score,
+            info=self.info,
+            prediction_metadata=self.prediction_metadata)
+        return self.result
+
+
+def execute_assignment(
+        environment: BaseEnvironment,
+        policy_clients: list[BasePolicyClient],
+        assignment: EpisodeAssignment,
+        max_episode_steps: int,
+        execute_horizon: int | None,
+        stop_on_success: bool,
+        on_episode_started: Callable[[EpisodeJob], None] | None = None,
+        on_episode_finished: (Callable[[EpisodeJob, EpisodeResult], None]
+                              | None) = None,
+        save_videos: bool = False,
+        video_dir: str | os.PathLike | None = None,
+        video_fps: int = 20,
+        video_worker_id: str | None = None,
+        on_case_rejected: (Callable[[EpisodeJob, str, Mapping[str, Any]], None]
+                           | None) = None,
+        *,
+        on_episode_interrupted: (Callable[[EpisodeJob, str, Mapping[str, Any]],
+                                          None] | None) = None,
+        execution_policy: ExecutionPolicy) -> list[EpisodeResult | None]:
+    """Advance one assignment with independent per-slot episode state.
+
+    Policy requests remain per episode. All environment inputs and results
+    are lists in slot order; unused and discarded attempts return None.
+    Emit each result when it finishes, keeping inactive slots frozen until
+    the group ends. Discard callbacks distinguish rejected cases from
+    interrupted attempts. Each slot owns its video recorder. Use the
+    execution policy constructed after environment setup for all assignments.
+    """
+    execution_policy.validate_assignment(assignment, policy_clients)
+    if max_episode_steps < 1 or (execute_horizon is not None
+                                 and execute_horizon < 1):
+        raise ValueError(
+            'Episode steps and execution horizon must be positive')
+    jobs = assignment.jobs
+    requests = [
+        EnvironmentResetRequest(job.task, job.episode_index,
+                                job.environment_seed,
+                                job.environment_case_index) for job in jobs
+    ]
+    requests.extend([None] * (execution_policy.capacity - len(jobs)))
+    states: list[_EpisodeState | None] = [None] * execution_policy.capacity
+    recorders: list[EpisodeVideoRecorder
+                    | None] = [None] * execution_policy.capacity
+
+    def discard_episode(slot: int, job: EpisodeJob, phase: str,
+                        result: CaseRejection | EpisodeInterruption) -> None:
+        if not isinstance(result.info, Mapping):
+            raise TypeError('Environment discard info must be a mapping')
+        if isinstance(result, EpisodeInterruption):
+            reason, callback = 'interrupted', on_episode_interrupted
+        else:
+            reason, callback = 'case_rejected', on_case_rejected
+        recorder = recorders[slot]
         if recorder is not None:
             recorder.abort()
-        raise
+            recorders[slot] = None
+        environment.finalize_episode(
+            slot, success=False, termination_reason=reason)
+        states[slot] = None
+        if callback is not None:
+            callback(job, phase=phase, info=result.info)
 
-    return EpisodeResult(
-        task_id=job.task.task_id,
-        episode_index=job.episode_index,
-        policy_seed=job.policy_seed,
-        environment_seed=job.environment_seed,
-        environment_case_index=job.environment_case_index,
-        success=success,
-        episode_return=episode_return,
-        steps=steps,
-        duration_s=time.perf_counter() - started,
-        termination_reason=termination_reason,
-        model_calls=model_calls,
-        score=score,
-        info=latest_info,
-        prediction_metadata=prediction_metadata,
-    )
+    def finish_episode(slot: int, state: _EpisodeState) -> None:
+        final_info = environment.finalize_episode(
+            slot,
+            success=state.success,
+            termination_reason=state.termination_reason)
+        if not isinstance(final_info, Mapping):
+            raise TypeError('Environment finalization info must be a mapping')
+        state.info.update(final_info)
+        recorder = recorders[slot]
+        if recorder is not None:
+            paths = recorder.finish(state.success)
+            recorders[slot] = None
+            if paths:
+                existing = state.info.get('video_paths', [])
+                if isinstance(existing, str):
+                    existing = [existing]
+                elif not isinstance(existing, (list, tuple)):
+                    raise TypeError('video_paths must be a sequence of paths')
+                state.info['video_paths'] = [*existing, *paths]
+        result = state.finish()
+        if on_episode_finished is not None:
+            on_episode_finished(state.job, result)
+
+    try:
+        resets = environment.reset_batch(requests)
+        if len(resets) != execution_policy.capacity:
+            raise ValueError('reset_batch returned the wrong number of slots')
+        for slot, (client, reset) in enumerate(zip(policy_clients, resets)):
+            if slot >= len(jobs):
+                if reset is not None:
+                    raise ValueError('Unused reset slots must return None')
+                continue
+            job = jobs[slot]
+            if isinstance(reset, (CaseRejection, EpisodeInterruption)):
+                discard_episode(slot, job, 'reset', reset)
+                continue
+            if not isinstance(reset, EnvironmentReset):
+                raise TypeError(
+                    'Active reset slots must return EnvironmentReset, '
+                    'CaseRejection or EpisodeInterruption')
+            if not isinstance(reset.info, Mapping):
+                raise TypeError('Environment reset info must be a mapping')
+            client.reset(job.task, job.episode_index, job.policy_seed)
+            client.set_episode_id(job.episode_id)
+            if on_episode_started is not None:
+                on_episode_started(job)
+            states[slot] = _EpisodeState(job, client, reset.observation,
+                                         dict(reset.info))
+            if save_videos and not environment.supports_native_video_recording:
+                if video_dir is None:
+                    raise ValueError(
+                        'video_dir is required when saving videos')
+                recorder = EpisodeVideoRecorder(
+                    video_dir, fps=video_fps, worker_id=video_worker_id)
+                recorders[slot] = recorder
+                recorder.start(job.task.task_id, job.episode_index)
+                recorder.capture(environment, slot)
+        while any(state is not None and state.result is None
+                  for state in states):
+            actions = [None] * execution_policy.capacity
+            for slot, state in enumerate(states):
+                if state is None or state.result is not None:
+                    continue
+                action = state.next_action(execute_horizon)
+                if state.termination_reason is not None:
+                    finish_episode(slot, state)
+                else:
+                    actions[slot] = action
+            if not any(action is not None for action in actions):
+                continue
+            transitions = environment.step_batch(actions)
+            if len(transitions) != execution_policy.capacity:
+                raise ValueError(
+                    'step_batch returned the wrong number of slots')
+            for slot, (state,
+                       transition) in enumerate(zip(states, transitions)):
+                if state is None or state.result is not None:
+                    if transition is not None:
+                        raise ValueError('Inactive slots must return None')
+                    continue
+                if isinstance(transition,
+                              (CaseRejection, EpisodeInterruption)):
+                    discard_episode(slot, state.job, 'step', transition)
+                    continue
+                if not isinstance(transition, StepResult):
+                    raise TypeError(
+                        'Active environment slot must return StepResult, '
+                        'CaseRejection or EpisodeInterruption')
+                state.advance(transition, max_episode_steps, stop_on_success)
+                recorder = recorders[slot]
+                if recorder is not None:
+                    recorder.capture(environment, slot)
+                if state.termination_reason is not None:
+                    finish_episode(slot, state)
+    except BaseException:
+        for recorder in recorders:
+            if recorder is not None:
+                recorder.abort()
+        raise
+    return [None if state is None else state.result for state in states]
 
 
 def build_context(task: TaskSpec,

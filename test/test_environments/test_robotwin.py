@@ -10,13 +10,15 @@ import numpy as np
 import pytest
 import yaml
 
+from fluxthemis.engines.runners.assignment import (EpisodeAssignment,
+                                                   ExecutionPolicy)
 from fluxthemis.engines.runners.episode import (build_episode_jobs,
-                                                execute_episode)
-from fluxthemis.environments import (EnvironmentCaseRejected,
+                                                execute_assignment)
+from fluxthemis.environments import (EnvironmentResetRequest,
                                      RoboTwinEnvironment)
 from fluxthemis.environments.sim.robotwin import CAMERA_KEYS, SEED_BLOCK
 from fluxthemis.model_clients.mock import MockPolicyClient
-from fluxthemis.structures import TaskSpec
+from fluxthemis.structures import CaseRejection, TaskSpec
 
 FAKE_TASK = '''
 import numpy as np
@@ -171,8 +173,8 @@ def generate_episode_descriptions(task, episodes, count):
 
 
 def reset(env, case=0, name='clean/adjust_bottle'):
-    return env.reset(
-        TaskSpec(name), 0, environment_seed=123, environment_case_index=case)
+    return env.reset_batch(
+        [EnvironmentResetRequest(TaskSpec(name), 0, 123, case)])[0]
 
 
 @pytest.mark.parametrize('suite,count,first', [('all', 100, 0),
@@ -220,7 +222,8 @@ def test_root_resolution(tmp_path, monkeypatch):
 
 def test_reset_order_seed_instruction_and_args(runtime):
     runtime.setup()
-    obs, info = reset(runtime, 3)
+    result = reset(runtime, 3)
+    obs, info = result.observation, result.info
     native = runtime._env
     assert [c[0] for c in native.calls
             ] == ['setup', 'play', 'close', 'setup', 'instruction']
@@ -234,7 +237,8 @@ def test_reset_order_seed_instruction_and_args(runtime):
         assert not args['eval_video_log']
         assert 'eval_video_save_dir' not in args
         assert args['head_camera_w'] == 6
-    assert reset(runtime, 3)[1]['task_description'] == info['task_description']
+    assert reset(runtime,
+                 3).info['task_description'] == info['task_description']
     with pytest.raises(RuntimeError, match='seed block'):
         reset(runtime, SEED_BLOCK)
     with pytest.raises(TypeError):
@@ -248,8 +252,7 @@ def test_expert_rejection(runtime, failure):
     runtime.setup()
     base = importlib.import_module('envs._base_task').FakeBaseTask
     base.failure = failure
-    with pytest.raises(EnvironmentCaseRejected):
-        reset(runtime)
+    assert isinstance(reset(runtime), CaseRejection)
     assert not runtime._active
     assert any(c[0] == 'close' for c in runtime._env.calls)
 
@@ -259,14 +262,12 @@ def test_error_limit_and_recovery(runtime):
     runtime.setup()
     base = importlib.import_module('envs._base_task').FakeBaseTask
     base.failure = 'error'
-    with pytest.raises(EnvironmentCaseRejected):
-        reset(runtime)
+    assert isinstance(reset(runtime), CaseRejection)
     base.failure = None
     reset(runtime, 1)
     assert runtime._consecutive_errors == 0
     base.failure = 'error'
-    with pytest.raises(EnvironmentCaseRejected):
-        reset(runtime, 2)
+    assert isinstance(reset(runtime, 2), CaseRejection)
     with pytest.raises(RuntimeError, match='broken expert') as error:
         reset(runtime, 3)
     assert isinstance(error.value.__cause__, ValueError)
@@ -274,28 +275,29 @@ def test_error_limit_and_recovery(runtime):
 
 def test_lazy_observation_and_render(runtime):
     runtime.setup()
-    obs, _ = reset(runtime)
+    obs = reset(runtime).observation
     assert len(obs) == 6 and 'qpos' in obs and list(obs)
     assert obs['task_description']
     assert runtime._env.obs_calls == 0
-    first = runtime.render()  # The initial frame is also the first prediction.
+    first = runtime.render(
+        0)  # The initial frame is also the first prediction.
     for key in CAMERA_KEYS:
         assert obs[key].dtype == np.uint8
     assert obs['qpos'].shape == (14, )
     assert obs['qpos'] is obs['states']
     assert runtime._env.obs_calls == 1
-    assert runtime.render() is first
+    assert runtime.render(0) is first
     state = np.random.get_state()
     for _ in range(2):
-        transition = runtime.step(np.zeros(14))
-        runtime.render()  # Reuse native now_obs between prediction chunks.
+        transition = runtime.step_batch([np.zeros(14)])[0]
+        runtime.render(0)  # Reuse native now_obs between prediction chunks.
     assert runtime._env.obs_calls == 1
     np.testing.assert_array_equal(np.random.get_state()[1], state[1])
     with pytest.raises(RuntimeError, match='stale'):
         _ = obs['qpos']
     _ = transition.observation['qpos']
     assert runtime._env.obs_calls == 2
-    assert runtime.step(np.zeros(14)).success
+    assert runtime.step_batch([np.zeros(14)])[0].success
 
 
 def test_step_validation_and_truncation(runtime):
@@ -304,9 +306,9 @@ def test_step_validation_and_truncation(runtime):
     runtime._env.success_at = 100
     for value in (np.zeros(13), np.zeros((1, 14)), np.full(14, np.nan)):
         with pytest.raises(ValueError):
-            runtime.step(value)
+            runtime.step_batch([value])[0]
     for _ in range(runtime._env.step_lim):
-        result = runtime.step(np.zeros(14))
+        result = runtime.step_batch([np.zeros(14)])[0]
     assert result.truncated and not result.terminated and not result.success
 
 
@@ -397,15 +399,14 @@ def test_partial_planner_initialization_is_not_reused(runtime, monkeypatch):
         return setup_demo(self, **kwargs)
 
     monkeypatch.setattr(base, 'setup_demo', fail_once)
-    with pytest.raises(EnvironmentCaseRejected):
-        reset(runtime)
+    assert isinstance(reset(runtime), CaseRejection)
     assert runtime._env is None
     assert runtime._task_name is None
     reset(runtime, 1)
     assert runtime._active
 
 
-def test_execute_episode(runtime):
+def test_execute_assignment(runtime):
     runtime.setup()
     job = build_episode_jobs(
         tasks=[runtime.tasks()[0]],
@@ -413,11 +414,22 @@ def test_execute_episode(runtime):
         base_seed=7,
         run_session_id='robotwin')[0]
     policy = MockPolicyClient(action_dim=14, chunk_size=10)
-    result = execute_episode(runtime, policy, job, 2000, 10, True)
+    result = execute_assignment(
+        runtime, [policy],
+        EpisodeAssignment([job]),
+        2000,
+        10,
+        True,
+        execution_policy=ExecutionPolicy.from_environment(runtime))[0]
     assert result.success and result.steps == 3 and result.model_calls == 1
     runtime._env.failure = 'unstable'
-    with pytest.raises(EnvironmentCaseRejected):
-        execute_episode(runtime, policy, job, 2000, 10, True)
+    assert execute_assignment(
+        runtime, [policy],
+        EpisodeAssignment([job]),
+        2000,
+        10,
+        True,
+        execution_policy=ExecutionPolicy.from_environment(runtime)) == [None]
 
 
 @pytest.mark.parametrize('save_video', [False, True])
@@ -443,8 +455,8 @@ def test_episode_observes_only_at_chunk_boundaries(runtime, monkeypatch,
         def start(self, task_id, episode_index):
             assert '/' not in _safe_name(task_id)
 
-        def capture(self, environment):
-            assert environment.render().shape == (4, 6, 3)
+        def capture(self, environment, slot):
+            assert environment.render(slot).shape == (4, 6, 3)
 
         def finish(self, success):
             return []
@@ -458,15 +470,15 @@ def test_episode_observes_only_at_chunk_boundaries(runtime, monkeypatch,
         episodes_per_task=1,
         base_seed=7,
         run_session_id='test')[0]
-    result = execute_episode(
-        runtime,
-        Policy(action_dim=14, chunk_size=50),
-        job,
+    result = execute_assignment(
+        runtime, [Policy(action_dim=14, chunk_size=50)],
+        EpisodeAssignment([job]),
         2000,
         10,
         True,
+        execution_policy=ExecutionPolicy.from_environment(runtime),
         save_videos=save_video,
-        video_dir=tmp_path)
+        video_dir=tmp_path)[0]
     assert result.steps == 12 and result.model_calls == 2
     assert runtime._env.obs_calls == 2
 

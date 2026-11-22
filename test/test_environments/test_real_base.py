@@ -38,14 +38,14 @@ def test_real_robot_safety_boundary():
         action_high=[1.0, 2.0],
     )
     environment.setup()
-    environment.step([0.5, -1.0])
+    environment.step_batch([[0.5, -1.0]])[0]
     np.testing.assert_array_equal(environment.last_action, [0.5, -1.0])
 
     with pytest.raises(ValueError, match='bounds'):
-        environment.step([1.5, 0.0])
+        environment.step_batch([[1.5, 0.0]])[0]
     environment.emergency_stop()
     with pytest.raises(RuntimeError, match='emergency-stopped'):
-        environment.step([0.0, 0.0])
+        environment.step_batch([[0.0, 0.0]])[0]
 
     environment.close()
     assert not environment.connected

@@ -1,0 +1,1 @@
+"""FluxThemis test suite."""

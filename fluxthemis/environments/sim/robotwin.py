@@ -20,9 +20,9 @@ import numpy as np
 import yaml
 
 from fluxthemis.engines.utils import ENVIRONMENTS
-from fluxthemis.structures import StepResult, TaskSpec
+from fluxthemis.structures import CaseRejection, StepResult, TaskSpec
 
-from ..base import BaseEnvironment, EnvironmentCaseRejected
+from ..base import SingleEnvironmentAdapter
 
 ROBOTWIN_TASKS = (
     'adjust_bottle', 'beat_block_hammer', 'blocks_ranking_rgb',
@@ -105,7 +105,7 @@ class _RoboTwinObservation(Mapping):
 
 
 @ENVIRONMENTS.register_module()
-class RoboTwinEnvironment(BaseEnvironment):
+class RoboTwinEnvironment(SingleEnvironmentAdapter):
     """Evaluate expert-validated cases with RoboTwin's native action loop."""
 
     def __init__(self,
@@ -331,7 +331,7 @@ class RoboTwinEnvironment(BaseEnvironment):
     def _reject(self, reason, seed):
         _LOG.warning('[RoboTwin] worker=%s rejected seed=%s: %s',
                      self.worker_id, seed, reason)
-        raise EnvironmentCaseRejected(f'{reason}; robotwin_seed={seed}')
+        return CaseRejection(dict(reason=reason, robotwin_seed=seed))
 
     def _close_expert(self):
         if self._env is None:
@@ -397,7 +397,7 @@ class RoboTwinEnvironment(BaseEnvironment):
             self._env.close_env()
         except self._unstable_error:
             self._close_expert()
-            self._reject('unstable seed', seed)
+            return self._reject('unstable seed', seed)
         except Exception as exc:
             self._close_expert()
             self._consecutive_errors += 1
@@ -406,9 +406,9 @@ class RoboTwinEnvironment(BaseEnvironment):
                 raise RuntimeError(
                     f'RoboTwin expert failed {self._consecutive_errors} times '
                     f'at seed {seed}: {exc}') from exc
-            self._reject('expert error', seed)
+            return self._reject('expert error', seed)
         if not (self._env.plan_success and self._env.check_success()):
-            self._reject('expert plan failed', seed)
+            return self._reject('expert plan failed', seed)
         self._consecutive_errors = 0
         try:
             setup_demo()
@@ -484,7 +484,7 @@ class RoboTwinEnvironment(BaseEnvironment):
             self._obs_cache.update(qpos=state, states=state)
         return self._obs_cache
 
-    def render(self):
+    def _render(self):
         if not self._active:
             return None
         if self._obs_cache is not None:

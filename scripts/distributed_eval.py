@@ -194,10 +194,8 @@ def main(argv=None) -> int:
     evaluation = cfg
     environment = evaluation['environment']
     if environment['type'] == 'RoboLabEnvironment':
-        if (isinstance(environment.get('num_envs', 1), bool)
-                or not isinstance(environment.get('num_envs', 1), int)
-                or environment.get('num_envs', 1) != 1):
-            raise ValueError('RoboLab num_envs must be 1')
+        from fluxthemis.structures import positive_integer
+        positive_integer(environment.get('num_envs', 1), 'RoboLab num_envs')
         if evaluation.get('resume_path') or args.simulator_restart_limit != 0:
             raise ValueError('RoboLab requires zero retries and no resume')
     if args.workers_per_gpu < 1:

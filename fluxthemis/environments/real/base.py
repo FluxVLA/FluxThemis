@@ -9,10 +9,10 @@ import numpy as np
 
 from fluxthemis.structures import StepResult, TaskSpec
 
-from ..base import BaseEnvironment
+from ..base import SingleEnvironmentAdapter
 
 
-class BaseRealRobotEnvironment(BaseEnvironment):
+class BaseRealRobotEnvironment(SingleEnvironmentAdapter):
     """Safety-oriented base for robot adapters.
 
     Actuation stays disabled unless ``allow_actuation=True`` is explicitly

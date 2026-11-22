@@ -14,17 +14,17 @@ from typing import Any
 from fluxthemis.engines.utils import (build_environment_from_cfg,
                                       build_policy_client_from_cfg,
                                       to_jsonable)
-from fluxthemis.environments.base import (BaseEnvironment,
-                                          EnvironmentCaseRejected)
+from fluxthemis.environments.base import BaseEnvironment
 from fluxthemis.model_clients.base import BasePolicyClient
 from fluxthemis.structures import TaskSpec
 
 from ...transports.zmq_protocol import (decode_frame, decode_header,
                                         empty_payload, encode_frame,
                                         encode_header)
+from .assignment import EpisodeAssignment, ExecutionPolicy
 from .config import (distributed_video_settings,
                      load_distributed_evaluation_config)
-from .episode import EpisodeJob, configure_worker_lifetime, execute_episode
+from .episode import EpisodeJob, configure_worker_lifetime, execute_assignment
 
 _SIMULATOR_STARTUP_TIMEOUT_S = 180.0
 
@@ -164,7 +164,7 @@ class _SimulatorWorker:
         socket.setsockopt(zmq.LINGER, 0)
         socket.connect(self.rollout_endpoint)
         environment: BaseEnvironment | None = None
-        policy_client: BasePolicyClient | None = None
+        policy_clients: list[BasePolicyClient] = []
         # Save stderr before simulator redirection, so Python failures reach
         # the supervisor's log before os._exit bypasses normal cleanup.
         error_fd = os.dup(2)
@@ -179,30 +179,39 @@ class _SimulatorWorker:
             environment.configure_worker(self.worker_id, self.deployment_id)
             environment.configure_simulator_device(self.device)
             environment.configure_video_recording(save_videos, video_dir)
-            policy_client = build_policy_client_from_cfg(
-                evaluation_cfg['policy_client'])
-            policy_client.setup()
+            for _ in range(environment.num_envs):
+                client = build_policy_client_from_cfg(
+                    evaluation_cfg['policy_client'])
+                policy_clients.append(client)
+                client.setup()
             environment.setup()
             tasks = tuple(
                 TaskSpec.from_value(task) for task in environment.tasks())
+            policy = ExecutionPolicy.from_environment(environment)
             socket.send_multipart([
                 encode_header('ready', **self._message_identity),
-                encode_frame({'tasks': [to_jsonable(task) for task in tasks]}),
+                encode_frame({
+                    'tasks': [to_jsonable(task) for task in tasks],
+                    'capacity': policy.capacity,
+                    'requires_single_task': policy.requires_single_task,
+                    'task_capacities': dict(policy.task_capacities),
+                }),
             ])
             self.ready_event.set()
             while True:
-                job = self._receive_job(socket)
-                if job is None:
+                assignment = self._receive_assignment(socket)
+                if assignment is None:
                     # Kit cleanup can terminate Python before run() returns.
                     # A zero exit is normal only after this protocol message.
                     self.stop_received.set()
                     return
-                self._execute_job(
+                self._execute_assignment(
                     socket=socket,
                     environment=environment,
-                    policy_client=policy_client,
+                    execution_policy=policy,
+                    policy_clients=policy_clients,
                     evaluation_cfg=evaluation_cfg,
-                    job=job,
+                    assignment=assignment,
                     save_videos=save_videos,
                     video_dir=video_dir,
                     video_fps=video_fps,
@@ -220,7 +229,7 @@ class _SimulatorWorker:
             finally:
                 os._exit(1)
         finally:
-            for component in (environment, policy_client):
+            for component in (environment, *policy_clients):
                 if component is None:
                     continue
                 try:
@@ -241,67 +250,103 @@ class _SimulatorWorker:
             empty_payload(),
         ])
 
-    def _receive_job(self, socket: Any) -> EpisodeJob | None:
+    def _receive_assignment(self, socket: Any) -> EpisodeAssignment | None:
         frames = socket.recv_multipart()
         header = decode_header(frames[0])
         self._validate_header(header)
         if header['type'] == 'shutdown_worker':
             return None
-        if header['type'] != 'episode_job':
+        if header['type'] != 'episode_assignment':
             raise RuntimeError(
                 f'Unexpected simulator command {header["type"]!r}')
         payload = frames[1] if len(frames) > 1 else empty_payload()
-        job = _episode_job_from_wire(decode_frame(payload))
-        if header.get('episode_id') != job.episode_id:
-            raise RuntimeError('simulator episode_id mismatch')
-        return job
+        body = decode_frame(payload)
+        if not isinstance(body, Mapping) or not isinstance(
+                body.get('jobs'), list):
+            raise TypeError('Assignment payload must contain a jobs list')
+        assignment = EpisodeAssignment(
+            [_episode_job_from_wire(value) for value in body['jobs']],
+            assignment_id=body.get('assignment_id'))
+        if header.get('assignment_id') != assignment.assignment_id:
+            raise RuntimeError('simulator assignment_id mismatch')
+        return assignment
 
-    def _execute_job(self, *, socket: Any, environment: BaseEnvironment,
-                     policy_client: BasePolicyClient,
-                     evaluation_cfg: Mapping[str, Any], job: EpisodeJob,
-                     save_videos: bool, video_dir: str | None,
-                     video_fps: int) -> None:
+    def _execute_assignment(self, *, socket: Any, environment: BaseEnvironment,
+                            execution_policy: ExecutionPolicy,
+                            policy_clients: list[BasePolicyClient],
+                            evaluation_cfg: Mapping[str, Any],
+                            assignment: EpisodeAssignment, save_videos: bool,
+                            video_dir: str | None, video_fps: int) -> None:
+        # The configured timeout covers the complete assignment, including
+        # reset, inference, stepping and per-slot artifact finalization.
         with _episode_timeout(self.episode_timeout_s):
 
-            def report_episode_start() -> None:
+            def report_episode_start(job: EpisodeJob) -> None:
                 _send_episode_event(
                     socket,
                     self._message_identity,
                     'episode_start',
                     job.episode_id,
-                )
+                    assignment_id=assignment.assignment_id)
 
-            try:
-                result = execute_episode(
-                    environment=environment,
-                    policy_client=policy_client,
-                    job=job,
-                    max_episode_steps=int(evaluation_cfg['max_episode_steps']),
-                    execute_horizon=evaluation_cfg.get('execute_horizon'),
-                    stop_on_success=bool(
-                        evaluation_cfg.get('stop_on_success', True)),
-                    on_episode_started=report_episode_start,
-                    save_videos=save_videos,
-                    video_dir=video_dir,
-                    video_fps=video_fps,
-                    video_worker_id=self.worker_id,
-                )
-            except EnvironmentCaseRejected as exc:
+            def report_episode_end(job: EpisodeJob, result: Any) -> None:
+                _send_episode_event(
+                    socket,
+                    self._message_identity,
+                    'episode_end',
+                    job.episode_id,
+                    assignment_id=assignment.assignment_id,
+                    payload=encode_frame(to_jsonable(result)))
+
+            def report_case_rejected(job: EpisodeJob, phase: str,
+                                     info: Mapping[str, Any]) -> None:
                 _send_episode_event(
                     socket,
                     self._message_identity,
                     'environment_case_rejected',
                     job.episode_id,
-                    message=str(exc),
-                )
-                return
-            _send_episode_event(
-                socket,
-                self._message_identity,
-                'episode_end',
-                job.episode_id,
-                payload=encode_frame(to_jsonable(result)),
+                    assignment_id=assignment.assignment_id,
+                    phase=phase,
+                    payload=encode_frame(to_jsonable(info)))
+
+            def report_episode_interrupted(job: EpisodeJob, phase: str,
+                                           info: Mapping[str, Any]) -> None:
+                _send_episode_event(
+                    socket,
+                    self._message_identity,
+                    'episode_interrupted',
+                    job.episode_id,
+                    assignment_id=assignment.assignment_id,
+                    phase=phase,
+                    payload=encode_frame(to_jsonable(info)))
+
+            execute_assignment(
+                environment=environment,
+                execution_policy=execution_policy,
+                policy_clients=policy_clients,
+                assignment=assignment,
+                max_episode_steps=int(evaluation_cfg['max_episode_steps']),
+                execute_horizon=evaluation_cfg.get('execute_horizon'),
+                stop_on_success=bool(
+                    evaluation_cfg.get('stop_on_success', True)),
+                on_episode_started=report_episode_start,
+                on_episode_finished=report_episode_end,
+                on_case_rejected=report_case_rejected,
+                on_episode_interrupted=report_episode_interrupted,
+                save_videos=save_videos,
+                video_dir=video_dir,
+                video_fps=video_fps,
+                video_worker_id=self.worker_id,
             )
+            # Results alone do not release a worker. All simulator execution
+            # and per-episode callbacks must return before accepting more work.
+            socket.send_multipart([
+                encode_header(
+                    'assignment_end',
+                    **self._message_identity,
+                    assignment_id=assignment.assignment_id),
+                empty_payload(),
+            ])
 
     def _validate_header(self, header: Mapping[str, Any]) -> None:
         if header.get('deployment_id') != self.deployment_id:

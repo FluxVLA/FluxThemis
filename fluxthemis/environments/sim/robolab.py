@@ -24,9 +24,10 @@ from typing import Any
 import numpy as np
 
 from fluxthemis.engines.utils import ENVIRONMENTS
-from fluxthemis.structures import StepResult, TaskSpec
+from fluxthemis.structures import (EnvironmentReset, StepResult, TaskSpec,
+                                   positive_integer)
 
-from ..base import BaseEnvironment
+from ..base import BaseEnvironment, EnvironmentResetRequest
 from .robolab_metrics import collect_episode_metrics
 
 
@@ -130,22 +131,17 @@ def _numpy(value):
     return np.asarray(value)
 
 
-def _single(value, name):
-    array = _numpy(value)
-    if array.size != 1:
-        raise ValueError(f'{name} must describe one native environment')
-    return array.reshape(-1)[0].item()
-
-
 @ENVIRONMENTS.register_module()
 class RoboLabEnvironment(BaseEnvironment):
-    """DROID adapter using the official scalar lifecycle.
+    """DROID adapter using the native parallel evaluation lifecycle.
 
     A worker owns one Isaac application. Consecutive episodes of the same task
     reuse the native environment; changing tasks closes and recreates it.
     ``simulator_seed`` applies at creation, while ``environment_seed`` and
     ``environment_case_index`` identify scheduled episodes, not reset layouts.
     """
+
+    requires_single_task = True
 
     def __init__(self,
                  task_name: str | Sequence[str],
@@ -157,14 +153,15 @@ class RoboLabEnvironment(BaseEnvironment):
                  kit_args: str = '',
                  cpu_thread_limit: int | None = None,
                  headless: bool = True,
-                 num_envs: int = 1,
                  camera_keys: Mapping[str, str] | None = None,
                  state_keys: Sequence[str] = ('arm_joint_pos', 'gripper_pos'),
                  renderer: str = 'realtime',
                  rendering_mode: str | None = None,
                  render_device_map: Mapping[str, int] | None = None,
                  kit_cache_root: str | os.PathLike | None = None,
-                 camera_preset: str | None = None) -> None:
+                 camera_preset: str | None = None,
+                 num_envs: int = 1) -> None:
+        self._num_envs = positive_integer(num_envs, 'num_envs')
         names = [task_name] if isinstance(task_name, str) else list(task_name)
         if not names or any(not isinstance(n, str) or not n.strip()
                             for n in names):
@@ -218,9 +215,6 @@ class RoboLabEnvironment(BaseEnvironment):
                                      cpu_thread_limit, 'cpu_thread_limit'))
         if self.cpu_thread_limit == 0:
             raise ValueError('cpu_thread_limit must be positive')
-        self.num_envs = _nonnegative_integer(num_envs, 'num_envs')
-        if self.num_envs != 1:
-            raise ValueError('num_envs must be 1')
         if not isinstance(headless, bool):
             raise TypeError('headless must be a boolean')
         self.headless = headless
@@ -263,12 +257,17 @@ class RoboLabEnvironment(BaseEnvironment):
         self._task_ids = set()
         self._env = None
         self._active_task_id = None
-        self._last_observation = None
+        self._last_observations = [None] * self.num_envs
         self._episode_active = False
         self._instance = 0
         self._instance_episode = 0
         self._worker_dir = None
-        self._episode_info = {}
+        self._episode_info = [None] * self.num_envs
+        self._steps = [0] * self.num_envs
+
+    @property
+    def num_envs(self) -> int:
+        return self._num_envs
 
     def configure_worker(self, worker_id: str, run_id: str) -> None:
         self._require_unstarted()
@@ -425,23 +424,38 @@ class RoboLabEnvironment(BaseEnvironment):
         self._require_setup()
         return self._tasks
 
-    def reset(self, task: TaskSpec, episode_index: int, *,
-              environment_seed: int | None,
-              environment_case_index: int | None) -> tuple[dict, dict]:
+    def reset_batch(
+        self, requests: list[EnvironmentResetRequest | None]
+    ) -> list[EnvironmentReset | None]:
         self._require_setup()
-        if not isinstance(task, TaskSpec):
-            raise TypeError('task must be a TaskSpec')
-        if task.task_id not in self._task_ids:
-            raise KeyError(f'Unknown RoboLab task id: {task.task_id}')
-        episode_index = _nonnegative_integer(episode_index, 'episode_index')
-        if environment_case_index is not None:
-            environment_case_index = _nonnegative_integer(
-                environment_case_index, 'environment_case_index')
-        if environment_seed is not None:
-            environment_seed = _nonnegative_integer(environment_seed,
-                                                    'environment_seed')
+        if len(requests) != self.num_envs:
+            raise ValueError('RoboLab reset requires one entry per slot')
+        active = [
+            slot for slot, request in enumerate(requests)
+            if request is not None
+        ]
+        results = [None] * self.num_envs
+        if not active:
+            return results
+        episode_info = [None] * self.num_envs
+        for slot in active:
+            request = requests[slot]
+            if not isinstance(request.task, TaskSpec):
+                raise TypeError('task must be a TaskSpec')
+            if request.task.task_id not in self._task_ids:
+                raise KeyError(
+                    f'Unknown RoboLab task id: {request.task.task_id}')
+            info = dict(benchmark='robolab', task_id=request.task.task_id)
+            for key in ('episode_index', 'environment_seed',
+                        'environment_case_index'):
+                value = getattr(request, key)
+                info[key] = (
+                    _nonnegative_integer(value, key)
+                    if value is not None or key == 'episode_index' else None)
+            episode_info[slot] = info
+        task = requests[active[0]].task
         self._episode_active = False
-        self._last_observation = None
+        self._last_observations = [None] * self.num_envs
         try:
             if task.task_id != self._active_task_id:
                 self._activate_task(task.task_id)
@@ -454,31 +468,37 @@ class RoboLabEnvironment(BaseEnvironment):
             recorder = self._env.recorder_manager
             if recorder is not None and hasattr(recorder, 'set_hdf5_file'):
                 recorder.set_hdf5_file(f'run_{self._instance_episode}.hdf5')
-                recorder.set_episode_index(0, env_ids=[0])
-            observation = self._observation(raw)
-            self._steps = 0
-            self._episode_info = dict(
-                benchmark='robolab',
-                task_id=task.task_id,
-                episode_index=episode_index,
-                environment_seed=environment_seed,
-                environment_case_index=environment_case_index,
-                simulator_seed=self.simulator_seed,
-                environment_instance=self._instance,
-                instance_episode=self._instance_episode,
-                native_hdf5_path=str(self._native_dir /
-                                     f'run_{self._instance_episode}.hdf5'),
-                initial_observation_sha256={
-                    key: hashlib.sha256(value.tobytes()).hexdigest()
-                    for key, value in observation.items()
-                    if isinstance(value, np.ndarray)
-                },
-                native_output_dir=str(self._native_dir),
-                native_max_episode_steps=self._max_steps)
+                for slot in range(self.num_envs):
+                    recorder.set_episode_index(slot, env_ids=[slot])
+            self._end_unrecorded_slots([
+                slot for slot, request in enumerate(requests)
+                if request is None
+            ])
+            self._steps = [0] * self.num_envs
+            for slot in active:
+                observation = self._observation(raw, slot)
+                info = episode_info[slot]
+                info.update(
+                    environment_slot=slot,
+                    simulator_seed=self.simulator_seed,
+                    environment_instance=self._instance,
+                    instance_episode=self._instance_episode,
+                    native_hdf5_path=str(self._native_dir /
+                                         f'run_{self._instance_episode}.hdf5'),
+                    native_demo_key=f'demo_{slot}',
+                    initial_observation_sha256={
+                        key: hashlib.sha256(value.tobytes()).hexdigest()
+                        for key, value in observation.items()
+                        if isinstance(value, np.ndarray)
+                    },
+                    native_output_dir=str(self._native_dir),
+                    native_max_episode_steps=self._max_steps)
+                self._last_observations[slot] = observation
+                results[slot] = EnvironmentReset(observation, dict(info))
+            self._episode_info = episode_info
             self._instance_episode += 1
-            self._last_observation = observation
             self._episode_active = True
-            return observation, dict(self._episode_info)
+            return results
         except Exception:
             self.close()
             raise
@@ -512,7 +532,7 @@ class RoboLabEnvironment(BaseEnvironment):
         self._active_task_id = task_id
         self._instance_episode = 0
 
-    def _observation(self, raw):
+    def _observation(self, raw, slot):
         if not isinstance(raw, Mapping):
             raise TypeError('RoboLab observation must be a mapping')
         flat = {}
@@ -521,7 +541,7 @@ class RoboLabEnvironment(BaseEnvironment):
             if (len(images.shape) != 4 or images.shape[0] != self.num_envs
                     or images.shape[-1] != 3 or min(images.shape[1:3]) == 0):
                 raise ValueError(f'{source} must be [N,H,W,3] RGB uint8')
-            image = _numpy(images[0])
+            image = _numpy(images[slot])
             if image.dtype != np.uint8:
                 raise ValueError(f'{source} must be [N,H,W,3] RGB uint8')
             flat[output] = image.copy()
@@ -530,23 +550,20 @@ class RoboLabEnvironment(BaseEnvironment):
             values = raw['proprio_obs'][key]
             if tuple(values.shape) != (self.num_envs, width):
                 raise ValueError(f'{key} must be finite numeric [N,{width}]')
-            part = _numpy(values[0])
+            part = _numpy(values[slot])
             if part.dtype.kind not in 'fiu':
                 raise ValueError(f'{key} must be finite numeric [N,{width}]')
             if not np.isfinite(part).all():
                 raise NonFiniteObservationError(
-                    key, 0, values.shape,
+                    key, slot, values.shape,
                     np.argwhere(~np.isfinite(part)).tolist())
             parts.append(part)
         flat['states'] = np.concatenate(parts).copy()
         flat['task_description'] = self._instruction
         return flat
 
-    def step(self, action: Any) -> StepResult:
-        self._require_setup()
-        if not self._episode_active:
-            raise RuntimeError(
-                'Call reset(): episode has not started or ended')
+    @staticmethod
+    def _action(action):
         array = _numpy(action)
         if array.shape != (8, ):
             raise ValueError(
@@ -562,21 +579,88 @@ class RoboLabEnvironment(BaseEnvironment):
             array = array.astype(np.float32)
         if not np.isfinite(array).all():
             raise ValueError('DROID action is outside the FP32 range')
+        return array
+
+    def _native_frozen(self, name='_frozen_envs'):
+        state = getattr(self._env, name, None)
+        if (not isinstance(state, self._runtime.torch.Tensor)
+                or tuple(state.shape) != (self.num_envs, )
+                or state.dtype != self._runtime.torch.bool):
+            raise RuntimeError(
+                f'RoboLab {name} must be a boolean tensor of length '
+                f'{self.num_envs}')
+        return state
+
+    def _freeze_slots(self, slots):
+        # Native RoboLab has no public API to stop individual slots. Its
+        # private mask gates actions, recording and terminal export; validate
+        # the contract before writing it for empty or externally ended slots.
+        frozen = self._native_frozen()
+        frozen[list(slots)] = True
+
+    def _end_unrecorded_slots(self, slots):
+        self._freeze_slots(slots)
+        # Native reset preserves buffers, including its initial-state records.
+        # Empty and externally ended slots have no native export to clear them
+        # before reuse, so discard their recordings explicitly.
+        recorder = self._env.recorder_manager
+        if slots and recorder is not None:
+            recorder.clear(env_ids=slots)
+
+    def _slot_value(self, value, name, slot):
+        array = _numpy(value)
+        if array.size != self.num_envs:
+            raise ValueError(f'{name} must describe every native environment')
+        return array.reshape(-1)[slot].item()
+
+    def step_batch(self, actions: list[Any | None]) -> list[StepResult | None]:
+        self._require_setup()
+        if len(actions) != self.num_envs:
+            raise ValueError('RoboLab step requires one entry per slot')
+        active = [
+            slot for slot, action in enumerate(actions) if action is not None
+        ]
+        results = [None] * self.num_envs
+        if not active:
+            if self._env is not None:
+                self._freeze_slots(range(self.num_envs))
+            return results
+        if not self._episode_active:
+            raise RuntimeError(
+                'Call reset_batch(): episode has not started or ended')
+        frozen = _numpy(self._native_frozen())
+        array = np.zeros((self.num_envs, 8), dtype=np.float32)
+        for slot in active:
+            if frozen[slot] or self._episode_info[slot] is None:
+                raise RuntimeError(f'RoboLab slot {slot} has already ended')
+            array[slot] = self._action(actions[slot])
+        self._freeze_slots(
+            [slot for slot, action in enumerate(actions) if action is None])
         native_action = self._runtime.torch.as_tensor(
-            array[None],
-            dtype=self._runtime.torch.float32,
-            device=self._env.device)
+            array, dtype=self._runtime.torch.float32, device=self._env.device)
         # Simulator / contract exceptions require reset before more steps.
         self._episode_active = False
         with self._runtime.torch.inference_mode():
             raw, reward, term, trunc, _ = self._env.step(native_action)
-        self._steps += 1
-        observation = self._observation(raw)
-        frozen = bool(self._env.all_terminated)
-        results = self._env.get_env_results()
-        if (len(results) != 1 or results[0].get('env_id') != 0):
-            raise RuntimeError('RoboLab returned invalid single-env results')
-        native_result = dict(results[0])
+        frozen = _numpy(self._native_frozen())
+        newly_frozen = frozen & ~_numpy(
+            self._native_frozen('_pre_step_frozen'))
+        native_results = self._env.get_env_results()
+        if (len(native_results) != self.num_envs or any(
+                result.get('env_id') != slot
+                for slot, result in enumerate(native_results))):
+            raise RuntimeError('RoboLab returned invalid per-env results')
+        for slot in active:
+            self._steps[slot] += 1
+            results[slot] = self._step_result(slot, raw, reward, term, trunc,
+                                              bool(newly_frozen[slot]),
+                                              dict(native_results[slot]))
+        self._episode_active = not frozen.all()
+        return results
+
+    def _step_result(self, slot, raw, reward, term, trunc, frozen,
+                     native_result):
+        observation = self._observation(raw, slot)
         success = native_result.get('success')
         if frozen:
             if (not isinstance(success, (bool, np.bool_))
@@ -585,41 +669,46 @@ class RoboLabEnvironment(BaseEnvironment):
             success = bool(success)
         elif success is not None or native_result.get('step') is not None:
             raise RuntimeError('Unfrozen RoboLab env has an unexpected result')
-        elif self._steps >= self._max_steps:
-            native_step = _single(self._env.episode_length_buf,
-                                  'episode_length_buf')
+        elif self._steps[slot] >= self._max_steps:
+            native_step = self._slot_value(self._env.episode_length_buf,
+                                           'episode_length_buf', slot)
+            raw_term = self._slot_value(term, 'terminated', slot)
+            raw_trunc = self._slot_value(trunc, 'truncated', slot)
             raise RuntimeError(
                 'RoboLab reached the native outer-loop limit without a final '
-                f'result: steps={self._steps}, result={native_result}, '
+                f'result: slot={slot}, steps={self._steps[slot]}, '
+                f'result={native_result}, '
                 f'native_episode_step={native_step}, '
-                f'raw_terminated={_single(term, "terminated")}, '
-                f'raw_truncated={_single(trunc, "truncated")}')
-        reward_value = float(_single(reward, 'reward'))
+                f'raw_terminated={raw_term}, raw_truncated={raw_trunc}')
+        reward_value = float(self._slot_value(reward, 'reward', slot))
         if not np.isfinite(reward_value):
             raise ValueError('RoboLab reward is not finite')
-        info = dict(self._episode_info)
+        info = dict(self._episode_info[slot])
         info.update(
-            wrapper_steps=self._steps,
+            wrapper_steps=self._steps[slot],
             native_episode_step=int(
-                _single(self._env.episode_length_buf, 'episode_length_buf')),
-            raw_terminated=bool(_single(term, 'terminated')),
-            raw_truncated=bool(_single(trunc, 'truncated')),
+                self._slot_value(self._env.episode_length_buf,
+                                 'episode_length_buf', slot)),
+            raw_terminated=bool(self._slot_value(term, 'terminated', slot)),
+            raw_truncated=bool(self._slot_value(trunc, 'truncated', slot)),
             native_frozen=frozen,
             native_result=native_result)
         score = None
         if frozen:
             try:
                 score, metrics_info = collect_episode_metrics(
-                    info['native_hdf5_path'], self._control_dt_s, success,
-                    int(native_result['step']))
+                    info['native_hdf5_path'],
+                    self._control_dt_s,
+                    success,
+                    int(native_result['step']),
+                    demo_key=info['native_demo_key'])
             except Exception as exc:
                 raise RuntimeError(
                     f'RoboLab terminal metrics failed: native_result='
                     f'{native_result}, hdf5={info["native_hdf5_path"]}: '
                     f'{type(exc).__name__}: {exc}') from exc
             info.update(metrics_info)
-        self._last_observation = observation
-        self._episode_active = not frozen
+        self._last_observations[slot] = observation
         return StepResult(
             observation=observation,
             reward=reward_value,
@@ -629,15 +718,30 @@ class RoboLabEnvironment(BaseEnvironment):
             score=score,
             info=info)
 
-    def render(self):
-        if self._last_observation is None:
+    def finalize_episode(self, slot: int, *, success: bool,
+                         termination_reason: str) -> dict:
+        self._require_setup()
+        slot = self._slot_index(slot)
+        if not self._native_frozen()[slot]:
+            self._end_unrecorded_slots([slot])
+        return {}
+
+    def _slot_index(self, slot):
+        slot = _nonnegative_integer(slot, 'slot')
+        if slot >= self.num_envs:
+            raise ValueError('RoboLab slot is outside the native batch')
+        return slot
+
+    def render(self, slot: int):
+        observation = self._last_observations[self._slot_index(slot)]
+        if observation is None:
             return None
-        return self._last_observation[next(iter(self.camera_keys))].copy()
+        return observation[next(iter(self.camera_keys))].copy()
 
     def _close_native(self):
         env, self._env = self._env, None
         self._active_task_id = None
-        self._last_observation = None
+        self._last_observations = [None] * self.num_envs
         self._episode_active = False
         if env is not None:
             env.close()

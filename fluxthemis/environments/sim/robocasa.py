@@ -11,7 +11,7 @@ import numpy as np
 from fluxthemis.engines.utils import ENVIRONMENTS
 from fluxthemis.structures import StepResult, TaskSpec
 
-from ..base import BaseEnvironment
+from ..base import SingleEnvironmentAdapter
 from .libero import configure_mujoco_egl_defaults
 
 ROBOCASA_ACTION_DIM = 29
@@ -45,7 +45,7 @@ class _RoboCasaRuntime:
 
 
 @ENVIRONMENTS.register_module()
-class RoboCasaEnvironment(BaseEnvironment):
+class RoboCasaEnvironment(SingleEnvironmentAdapter):
     """RoboCasa GR1 adapter matching FluxVLA evaluation semantics.
 
     Observations and episode language remain untouched. FluxVLA owns image
@@ -256,7 +256,7 @@ class RoboCasaEnvironment(BaseEnvironment):
             info=result_info,
         )
 
-    def render(self) -> Any | None:
+    def _render(self) -> Any | None:
         if self._last_observation is None:
             return None
         image = self._last_observation.get(self.render_key)
